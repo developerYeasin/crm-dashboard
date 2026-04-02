@@ -1,0 +1,12 @@
+[Unit]
+Description=Run QA Agent daily at 2 AM
+Requires=order-tracker-agent@qa.service
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=5m
+# Run at 2 AM with random delay up to 5 minutes
+
+[Install]
+WantedBy=timers.target

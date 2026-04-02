@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Backend Dev Agent every 6 hours
+Requires=order-tracker-agent.service
+
+[Timer]
+OnCalendar=*-*-* 0/6:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=CRM Dashboard AI Assistant
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/crm-dashboard/backend
+Environment="PATH=/root/crm-dashboard/backend/venv/bin"
+ExecStart=/root/crm-dashboard/backend/venv/bin/python /root/crm-dashboard/backend/app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

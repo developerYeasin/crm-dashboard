@@ -1,0 +1,14 @@
+[Unit]
+Description=Order Tracker AI Agent
+After=network.target mysql.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/root/order-tracker/backend/.env
+WorkingDirectory=/root/order-tracker/backend
+ExecStart=/root/order-tracker/backend/venv/bin/python -m agents.run_agent --type %i
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Frontend Dev Agent every 4 hours
+Requires=order-tracker-agent@frontend.service
+
+[Timer]
+OnCalendar=*-*-* 0/4:00
+Persistent=true
+RandomizedDelaySec=5m
+# Runs every 4 hours with random delay
+
+[Install]
+WantedBy=timers.target
