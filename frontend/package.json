@@ -1,5 +1,5 @@
 {
-  "name": "crm-dashboard-frontend",
+  "name": "max-ai-agent-frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -19,9 +19,12 @@
     "react-icons": "^5.6.0",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.20.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "socket.io-client": "^4.7.2"
   },
   "devDependencies": {
+    "@tailwindcss/line-clamp": "^0.4.4",
+    "@tailwindcss/typography": "^0.5.19",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
     "@vitejs/plugin-react": "^4.2.0",

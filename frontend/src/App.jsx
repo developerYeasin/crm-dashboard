@@ -11,7 +11,10 @@ import Notes from './pages/Notes';
 import KnowledgeBase from './pages/KnowledgeBase';
 import Scheduled from './pages/Scheduled';
 import Agents from './pages/Agents';
-import AIAssistant from './pages/AIAssistant';
+import MaxAIAgent from './pages/MaxAIAgent';
+import AgentSessions from './pages/AgentSessions';
+import AgentTemplates from './pages/AgentTemplates';
+import AgentMemories from './pages/AgentMemories';
 
 // Protected Route wrapper
 function ProtectedRoute({ children }) {
@@ -146,8 +149,36 @@ function AppRoutes() {
         path="/ai-assistant"
         element={
           <ProtectedRoute>
+            <MaxAIAgent />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/agent-sessions"
+        element={
+          <ProtectedRoute>
             <Layout>
-              <AIAssistant />
+              <AgentSessions />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/agent-templates"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <AgentTemplates />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/agent-memories"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <AgentMemories />
             </Layout>
           </ProtectedRoute>
         }
@@ -159,7 +190,12 @@ function AppRoutes() {
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter
+      future={{
+        v7_startTransition: true,
+        v7_relativeSplatPath: true
+      }}
+    >
       <AuthProvider>
         <ThemeProvider>
           <AppRoutes />

@@ -2,6 +2,7 @@ Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
 Flask-CORS==4.0.0
 Flask-Bcrypt==1.0.1
+Flask-SocketIO==5.3.6
 # mysqlclient optional - using PyMySQL driver instead
 PyMySQL==1.1.0
 PyJWT==2.8.0
@@ -16,3 +17,11 @@ APScheduler==3.11.0
 schedule==1.2.2
 requests==2.32.3
 python-telegram-bot==20.7
+# WebSocket Support
+eventlet==0.35.1
+simple-websocket==0.10.1
+# AI Model Dependencies (Max Model 1)
+scikit-learn==1.4.0
+numpy==1.24.3
+sentence-transformers==2.2.2
+faiss-cpu==1.7.4  # Use faiss-gpu if CUDA available
