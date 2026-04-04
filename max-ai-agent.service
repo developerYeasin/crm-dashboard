@@ -1,0 +1,15 @@
+[Unit]
+Description=Max AI Agent AI Assistant
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/max-ai-agent/backend
+Environment="PATH=/root/max-ai-agent/backend/venv/bin"
+ExecStart=/root/max-ai-agent/backend/venv/bin/python /root/max-ai-agent/backend/app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

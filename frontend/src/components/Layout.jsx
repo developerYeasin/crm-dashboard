@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { FiHome, FiCheckSquare, FiUsers, FiCalendar, FiFileText, FiBook, FiClock, FiLogOut, FiMenu, FiX, FiBell, FiSun, FiMoon, FiSearch, FiMessageSquare } from 'react-icons/fi';
+import { FiHome, FiCheckSquare, FiUsers, FiCalendar, FiFileText, FiBook, FiClock, FiLogOut, FiMenu, FiX, FiBell, FiSun, FiMoon, FiSearch, FiMessageSquare, FiCpu, FiGrid, FiDatabase } from 'react-icons/fi';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import NotificationsPanel from './NotificationsPanel';
@@ -14,6 +14,9 @@ const navigation = [
   { name: 'Knowledge Base', href: '/knowledge', icon: FiBook },
   { name: 'Scheduled', href: '/scheduled', icon: FiClock },
   { name: 'AI Assistant', href: '/ai-assistant', icon: FiMessageSquare },
+  { name: 'Agent Sessions', href: '/agent-sessions', icon: FiCpu },
+  { name: 'Agent Templates', href: '/agent-templates', icon: FiGrid },
+  { name: 'Agent Memories', href: '/agent-memories', icon: FiDatabase },
 ];
 
 export default function Layout({ children }) {
@@ -86,7 +89,7 @@ export default function Layout({ children }) {
           {/* Logo */}
           <div className="flex items-center justify-between px-6 py-5 border-b border-gray-200 dark:border-dark-700">
             <Link to="/" className="text-xl font-bold text-primary-500">
-              CRM Dashboard
+              Max AI Agent
             </Link>
             <button
               className="lg:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-dark-800"

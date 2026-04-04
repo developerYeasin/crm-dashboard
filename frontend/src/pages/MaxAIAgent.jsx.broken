@@ -1,0 +1,663 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import axios from 'axios';
+import {
+  FiSend, FiPlus, FiTrash2, FiMessageSquare, FiClock,
+  FiCpu, FiHardDrive, FiTerminal, FiChevronRight, FiChevronDown,
+  FiUpload, FiX, FiWifi, FiWifiOff, FiMoreHorizontal
+} from 'react-icons/fi';
+import { useSocket } from '../hooks/useSocket';
+import { aiApi } from '../services/api';
+import { chatApi } from '../services/chat-api';
+
+export default function MaxAIAgent() {
+  const { user } = useAuth();
+  const socket = useSocket();
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState('chat'); // chat, cron, logs, metrics
+
+  // Chat state
+  const [conversations, setConversations] = useState([]);
+  const [currentConv, setCurrentConv] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [typingUsers, setTypingUsers] = useState(new Set());
+  const [uploading, setUploading] = useState(false);
+
+  // UI state
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Refs
+  const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const textInputRef = useRef(null);
+  const inputFormRef = useRef(null);
+
+  // Cron state
+  const [cronJobs, setCronJobs] = useState([]);
+  const [newCronForm, setNewCronForm] = useState({ name: '', command: '', schedule: '* * * * *', description: '' });
+
+  // Metrics state
+  const [systemMetrics, setSystemMetrics] = useState(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+
+  // Logs state
+  const [commandHistory, setCommandHistory] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [execCommand, setExecCommand] = useState('');
+  const [commandOutput, setCommandOutput] = useState('');
+
+  // Typing debounce
+  const typingTimeoutRef = useRef(null);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, sending]);
+
+  // Subscribe to socket events
+  useEffect(() => {
+    if (!socket.isAuthenticated) return;
+
+    const handleNewMessage = (message) => {
+      setMessages(prev => {
+        // Avoid duplicates
+        if (prev.some(m => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+    };
+
+    const handleResponseChunk = (data) => {
+      // Could implement streaming token display here
+    };
+
+    const handleResponseComplete = (data) => {
+      // AI response is already added via new_message event
+    };
+
+    const handleConversationUpdated = (data) => {
+      setConversations(prev => prev.map(conv => {
+        if (conv.id === data.conversation_id) {
+          return {
+            ...conv,
+            last_message: data.last_message,
+            updated_at: data.updated_at
+          };
+        }
+        return conv;
+      }));
+    };
+
+    const handleUserTyping = (data) => {
+      setTypingUsers(prev => new Set(prev).add(data.user_id));
+    };
+
+    const handleUserStoppedTyping = (data) => {
+      setTypingUsers(prev => {
+        const next = new Set(prev);
+        next.delete(data.user_id);
+        return next;
+      });
+    };
+
+    socket.subscribe('new_message', handleNewMessage);
+    socket.subscribe('ai_response_chunk', handleResponseChunk);
+    socket.subscribe('ai_response_complete', handleResponseComplete);
+    socket.subscribe('conversation_updated', handleConversationUpdated);
+    socket.subscribe('user_typing', handleUserTyping);
+    socket.subscribe('user_stopped_typing', handleUserStoppedTyping);
+
+    return () => {
+      socket.unsubscribe('new_message', handleNewMessage);
+      socket.unsubscribe('ai_response_chunk', handleResponseChunk);
+      socket.unsubscribe('ai_response_complete', handleResponseComplete);
+      socket.unsubscribe('conversation_updated', handleConversationUpdated);
+      socket.unsubscribe('user_typing', handleUserTyping);
+      socket.unsubscribe('user_stopped_typing', handleUserStoppedTyping);
+    };
+  }, [socket]);
+
+  // Load initial data when authenticated
+  useEffect(() => {
+    if (socket.isAuthenticated) {
+      loadConversations();
+      if (activeTab === 'cron') loadCronJobs();
+      if (activeTab === 'metrics') loadSystemMetrics();
+      if (activeTab === 'logs') loadCommandHistory();
+    }
+  }, [socket.isAuthenticated, activeTab]);
+
+  const loadConversations = async () => {
+    try {
+      const res = await chatApi.getConversations();
+      setConversations(res.data);
+      if (res.data.length > 0 && !currentConv) {
+        setCurrentConv(res.data[0]);
+        socket.joinConversation(res.data[0].id);
+        loadMessages(res.data[0].id);
+      } else if (res.data.length === 0 && !currentConv) {
+        // No conversations, create one
+        await createConversation('New Chat');
+      } else if (currentConv) {
+        loadMessages(currentConv.id);
+      }
+    } catch (error) {
+      console.error('Failed to load conversations:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMessages = async (convId) => {
+    try {
+      const res = await chatApi.getConversation(convId);
+      // Get messages separately
+      const messagesRes = await chatApi.getConversationMessages(convId);
+      setMessages(messagesRes.data);
+      setCurrentConv(res.data);
+    } catch (error) {
+      console.error('Failed to load messages:', error);
+    }
+  };
+
+  const createConversation = async (title) => {
+    try {
+      const res = await chatApi.createConversation(title);
+      setConversations(prev => [res.data, ...prev]);
+      setCurrentConv(res.data);
+      socket.joinConversation(res.data.id);
+      setMessages([]);
+      return res.data;
+    } catch (error) {
+      console.error('Failed to create conversation:', error);
+      throw error;
+    }
+  };
+
+  const deleteConversation = async (id, e) => {
+    e?.stopPropagation();
+    if (!confirm('Delete this conversation?')) return;
+
+    try {
+      await chatApi.deleteConversation(id);
+      setConversations(prev => prev.filter(c => c.id !== id));
+      if (currentConv?.id === id) {
+        setCurrentConv(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Failed to delete conversation:', error);
+    }
+  };
+
+  const loadCronJobs = async () => {
+    try {
+      setCronJobs([]);
+      const res = await aiApi.listCronJobs();
+      setCronJobs(res.data);
+    } catch (error) {
+      console.error('Failed to load cron jobs:', error);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  const createCronJob = async (e) => {
+    e.preventDefault();
+    try {
+      await aiApi.createCronJob(newCronForm.name, newCronForm.command, newCronForm.schedule, newCronForm.description);
+      setNewCronForm({ name: '', command: '', schedule: '* * * * *', description: '' });
+      loadCronJobs();
+    } catch (error) {
+      console.error('Failed to create cron job:', error);
+    }
+  };
+
+  const loadSystemMetrics = async () => {
+    try {
+      setMetricsLoading(true);
+      const res = await aiApi.getSystemMetrics();
+      setSystemMetrics(res.data);
+    } catch (error) {
+      console.error('Failed to load system metrics:', error);
+    } finally {
+      setMetricsLoading(false);
+    }
+  };
+
+  const loadCommandHistory = async () => {
+    try {
+      setLogsLoading(true);
+      const res = await aiApi.getSystemCommandLogs(50);
+      setCommandHistory(res.data);
+    } catch (error) {
+      console.error('Failed to load command logs:', error);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  const executeCommand = async (e) => {
+    e.preventDefault();
+    if (!execCommand.trim()) return;
+
+    try {
+      const res = await aiApi.executeCommand(execCommand);
+      setCommandOutput(res.data.output || res.data.error || 'Command executed');
+    } catch (error) {
+      setCommandOutput(error.response?.data?.error || 'Failed to execute command');
+    }
+  };
+
+  const sendMessage = async (e) => {
+    e?.preventDefault();
+    if (!input.trim() || sending || !currentConv) return;
+
+    const message = input.trim();
+    setInput('');
+    setSending(true);
+
+    try {
+      await socket.sendMessage(currentConv.id, message);
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      setSending(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diff = now - date;
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return `${days} days ago`;
+    return date.toLocaleDateString();
+  };
+
+  const formatTime = (dateStr) => {
+    if (!dateStr) return '';
+    return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-100 dark:bg-dark-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Loading Max AI Agent...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-screen w-full flex bg-gray-100 dark:bg-dark-950 overflow-hidden">
+      {/* Sidebar */}
+      <div className={`${sidebarOpen ? 'w-80' : 'w-0'} bg-white dark:bg-dark-900 border-r border-gray-200 dark:border-dark-700 flex flex-col transition-all duration-300 overflow-hidden`}>
+        {/* Sidebar Header */}
+        <div className="p-4 border-b border-gray-200 dark:border-dark-700 flex items-center justify-between shrink-0">
+          <h1 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+            <FiMessageSquare className="text-primary-500" />
+            Max AI
+          </h1>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="p-1.5 hover:bg-gray-100 dark:hover:bg-dark-800 rounded-lg text-gray-500 transition-colors"
+          >
+            <FiX className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* New Chat Button */}
+        <div className="p-4 shrink-0">
+          <button
+            onClick={() => createConversation('New Chat').then(() => setSidebarOpen(true))}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-600 hover:bg-primary-700 text-white rounded-lg font-medium transition-colors"
+          >
+            <FiPlus className="w-4 h-4" />
+            New Conversation
+          </button>
+        </div>
+
+        {/* Conversations List */}
+        <div className="flex-1 overflow-y-auto px-2">
+          {conversations.length === 0 ? (
+            <div className="p-4 text-center text-gray-500 dark:text-gray-400">
+              <p className="text-sm">No conversations yet</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {conversations.map(conv => (
+                <div
+                  key={conv.id}
+                  onClick={() => {
+                    setCurrentConv(conv);
+                    socket.joinConversation(conv.id);
+                    loadMessages(conv.id);
+                  }}
+                  className={`group p-3 rounded-lg cursor-pointer transition-all ${
+                    currentConv?.id === conv.id
+                      ? 'bg-primary-50 dark:bg-primary-900/30 border-l-3 border-primary-500'
+                      : 'hover:bg-gray-50 dark:hover:bg-dark-800 border-l-3 border-transparent'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-medium text-gray-900 dark:text-white text-sm truncate">
+                        {conv.title || 'New Chat'}
+                      </h3>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center">
+                        <FiClock className="w-3 h-3 mr-1" />
+                        {formatDate(conv.updated_at)}
+                      </p>
+                    </div>
+                    <button
+                      onClick={(e) => deleteConversation(conv.id, e)}
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 dark:hover:bg-red-900/30 rounded text-gray-400 hover:text-red-500 transition-all"
+                      title="Delete conversation"
+                    >
+                      <FiTrash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Connection Status */}
+        <div className="p-3 border-t border-gray-200 dark:border-dark-700 shrink-0">
+          <div className="flex items-center justify-between text-sm">
+            <span className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+              {socket.isConnected && socket.isAuthenticated ? (
+                <>
+                  <FiWifi className="w-4 h-4 text-green-500" />
+                  <span className="text-green-600 dark:text-green-400 font-medium">Connected</span>
+                </>
+              ) : (
+                <>
+                  <FiWifiOff className="w-4 h-4 text-red-500" />
+                  <span className="text-red-600 dark:text-red-400">Connecting...</span>
+                </>
+              )}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+            {socket.isAuthenticated ? 'Chat ready' : 'Sign in required'}
+          </p>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {currentConv ? (
+          <>
+            {/* Header */}
+            <header className="bg-white dark:bg-dark-900 border-b border-gray-200 dark:border-dark-700 px-6 py-4 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                {!sidebarOpen && (
+                  <button
+                    onClick={() => setSidebarOpen(true)}
+                    className="p-2 hover:bg-gray-100 dark:hover:bg-dark-800 rounded-lg text-gray-600 dark:text-gray-400 transition-colors"
+                  >
+                    <FiMessageSquare className="w-5 h-5" />
+                  </button>
+                )}
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white truncate max-w-md">
+                    {currentConv.title || 'Chat'}
+                  </h2>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {typingUsers.size > 0 ? (
+                      <span className="flex items-center gap-1">
+                        <span className="w-2 h-2 bg-primary-500 rounded-full animate-pulse"></span>
+                        Someone typing...
+                      </span>
+                    ) : (
+                      `${messages.length} messages`
+                    )}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => createConversation('New Chat')}
+                  className="p-2 hover:bg-gray-100 dark:hover:bg-dark-800 rounded-lg text-gray-600 dark:text-gray-400 transition-colors"
+                  title="New conversation"
+                >
+                  <FiPlus className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => deleteConversation(currentConv.id)}
+                  className="p-2 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-lg text-gray-600 dark:hover:text-red-500 transition-colors"
+                  title="Delete conversation"
+                >
+                  <FiTrash2 className="w-5 h-5" />
+                </button>
+              </div>
+            </header>
+
+            {/* Messages Area */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 bg-gray-50 dark:bg-dark-950">
+              <div className="max-w-4xl mx-auto space-y-6">
+                {messages.map((msg, idx) => (
+                  <div
+                    key={msg.id || idx}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`flex gap-3 max-w-[85%] ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                      {/* Avatar */}
+                      {msg.role === 'assistant' && (
+                        <div className="w-10 h-10 rounded-full bg-primary-500 flex items-center justify-center text-white font-bold text-sm shrink-0 shadow-sm">
+                          AI
+                        </div>
+                      )}
+
+                      {/* Message Bubble */}
+                      <div
+                        className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                      >
+                        <div
+                          className={`rounded-2xl px-5 py-3 ${
+                            msg.role === 'user'
+                              ? 'bg-primary-600 text-white rounded-br-md shadow-sm'
+                              : 'bg-white dark:bg-dark-800 text-gray-900 dark:text-gray-100 rounded-bl-md shadow-sm border border-gray-200 dark:border-dark-700'
+                          }`}
+                        >
+                          {/* Attachments */}
+                          {(msg.attachments || msg.images) && (msg.attachments || msg.images).length > 0 && (
+                            <div className="flex flex-wrap gap-2 mb-3">
+                              {(msg.attachments || msg.images).map((img, imgIdx) => (
+                                <img
+                                  key={imgIdx}
+                                  src={img.file_url || img.data}
+                                  alt={img.original_name || img.name}
+                                  className="max-w-[150px] max-h-[150px] object-cover rounded-lg border-2 border-white/30 cursor-pointer hover:opacity-90 transition-opacity"
+                                  onClick={() => window.open(img.file_url || img.data, '_blank')}
+                                />
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Message Content */}
+                          <div className="whitespace-pre-wrap break-words leading-relaxed text-[15px]">
+                            {msg.content}
+                          </div>
+
+                          {/* Action / Command Output */}
+                          {msg.action_taken && (
+                            <div className="mt-3 pt-2 border-t border-gray-300 dark:border-gray-600 text-xs">
+                              <span className="font-semibold opacity-75">Action:</span> {msg.action_taken}
+                            </div>
+                          )}
+                          {msg.command_executed && (
+                            <div className="mt-2">
+                              <pre className="text-xs bg-gray-900 dark:bg-black p-3 rounded-md overflow-x-auto max-h-64 text-gray-300 font-mono">
+                                <code>{msg.command_output || msg.command_executed}</code>
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Timestamp */}
+                        <span className="text-xs text-gray-400 dark:text-gray-500 mt-1 px-1">
+                          {formatTime(msg.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {sending && (
+                  <div className="flex justify-start">
+                    <div className="flex gap-3 max-w-[85%]">
+                      <div className="w-10 h-10 rounded-full bg-primary-500 flex items-center justify-center text-white font-bold text-sm shrink-0 shadow-sm">
+                        AI
+                      </div>
+                      <div className="rounded-2xl rounded-bl-md px-5 py-4 bg-white dark:bg-dark-800 border border-gray-200 dark:border-dark-700 shadow-sm">
+                        <div className="flex items-center gap-2">
+                          <div className="flex gap-1">
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></span>
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-100"></span>
+                            <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-200"></span>
+                          </div>
+                          <span className="text-sm text-gray-500">Thinking...</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} />
+              </div>
+            </div>
+
+            {/* Input Area */}
+            <div className="bg-white dark:bg-dark-900 border-t border-gray-200 dark:border-dark-700 px-6 py-4 shrink-0">
+              <div className="max-w-4xl mx-auto">
+                <form ref={inputFormRef} onSubmit={sendMessage} className="flex gap-3 items-end">
+                  <div className="flex-1 relative">
+                    <textarea
+                      ref={textInputRef}
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="Type your message... (Shift+Enter for new line)"
+                      rows={1}
+                      className="w-full px-4 py-3 bg-gray-100 dark:bg-dark-800 border border-gray-300 dark:border-dark-600 rounded-xl text-gray-900 dark:text-white placeholder-gray-500 focus:ring-2 focus:ring-primary-500 focus:border-transparent focus:outline-none resize-none text-[15px] leading-relaxed overflow-y-auto max-h-32"
+                      style={{ minHeight: '44px' }}
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={!input.trim() || sending}
+                    className="px-5 py-3 bg-primary-600 hover:bg-primary-700 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-colors flex items-center gap-2 shrink-0"
+                  >
+                    <FiSend className="w-4 h-4" />
+                    Send
+                  </button>
+                </form>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-2 text-center">
+                  Max AI can make mistakes. Verify important information.
+                </p>
+              </div>
+            </div>
+          </>
+        ) : (
+          /* Empty State */
+          <div className="flex-1 flex flex-col items-center justify-center px-6">
+            <div className="text-center max-w-md">
+              <div className="w-24 h-24 bg-gray-200 dark:bg-dark-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                <FiMessageSquare className="w-12 h-12 text-gray-400" />
+              </div>
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">
+                Welcome to Max AI
+              </h2>
+              <p className="text-gray-600 dark:text-gray-400 mb-6">
+                Start a new conversation or select an existing one from the sidebar.
+              </p>
+              <button
+                onClick={() => createConversation('New Chat')}
+                className="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-xl transition-colors inline-flex items-center gap-2"
+              >
+                <FiPlus className="w-5 h-5" />
+                Start New Chat
+              </button>
+
+              <div className="mt-8 pt-8 border-t border-gray-200 dark:border-dark-700">
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Quick Actions</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => { createConversation('System Metrics'); setTimeout(() => socket.sendMessage && socket.sendMessage(1, 'Show system metrics'), 500); }}
+                    className="p-4 bg-gray-50 dark:bg-dark-800 hover:bg-gray-100 dark:hover:bg-dark-700 border border-gray-200 dark:border-dark-700 rounded-xl text-left transition-colors"
+                  >
+                    <FiCpu className="w-6 h-6 text-primary-500 mb-2" />
+                    <span className="text-sm font-medium text-gray-900 dark:text-white block">System Metrics</span>
+                  </button>
+                  <button
+                    onClick={() => { createConversation('Cron Jobs'); setTimeout(() => socket.sendMessage && socket.sendMessage(1, 'Show cron jobs'), 500); }}
+                    className="p-4 bg-gray-50 dark:bg-dark-800 hover:bg-gray-100 dark:hover:bg-dark-700 border border-gray-200 dark:border-dark-700 rounded-xl text-left transition-colors"
+                  >
+                    <FiClock className="w-6 h-6 text-primary-500 mb-2" />
+                    <span className="text-sm font-medium text-gray-900 dark:text-white block">Cron Jobs</span>
+                  </button>
+                  <button
+                    onClick={() => { createConversation('Command Logs'); setTimeout(() => socket.sendMessage && socket.sendMessage(1, 'Show system command logs'), 500); }}
+                    className="p-4 bg-gray-50 dark:bg-dark-800 hover:bg-gray-100 dark:hover:bg-dark-700 border border-gray-200 dark:border-dark-700 rounded-xl text-left transition-colors"
+                  >
+                    <FiTerminal className="w-6 h-6 text-primary-500 mb-2" />
+                    <span className="text-sm font-medium text-gray-900 dark:text-white block">Command Logs</span>
+                  </button>
+                  <button
+                    onClick={() => { createConversation('Help'); setTimeout(() => socket.sendMessage && socket.sendMessage(1, 'What can you do?'), 500); }}
+                    className="p-4 bg-gray-50 dark:bg-dark-800 hover:bg-gray-100 dark:hover:bg-dark-700 border border-gray-200 dark:border-dark-700 rounded-xl text-left transition-colors"
+                  >
+                    <FiMessageSquare className="w-6 h-6 text-primary-500 mb-2" />
+                    <span className="text-sm font-medium text-gray-900 dark:text-white block">Get Help</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Tabs Bar (for non-chat views) - Show only when sidebarOpen is false OR we could make this a top bar */}
+        {activeTab !== 'chat' && (
+          <div className="absolute top-16 right-8 bg-white dark:bg-dark-900 rounded-lg shadow-lg border border-gray-200 dark:border-dark-700 z-10">
+            <div className="flex">
+              {['chat', 'cron', 'logs', 'metrics'].map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-4 py-2 text-sm font-medium capitalize ${
+                    activeTab === tab
+                      ? 'text-primary-600 border-b-2 border-primary-500'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                  }`}
+                >
+                  {tab === 'cron' ? 'Cron' : tab === 'logs' ? 'Logs' : tab === 'metrics' ? 'Metrics' : tab}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

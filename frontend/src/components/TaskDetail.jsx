@@ -35,7 +35,7 @@ export default function TaskDetail({ taskId, onClose, onUpdate }) {
       fetchTask();
       onUpdate?.();
     } catch (error) {
-      alert('Failed to add comment');
+      
     } finally {
       setSubmittingComment(false);
     }

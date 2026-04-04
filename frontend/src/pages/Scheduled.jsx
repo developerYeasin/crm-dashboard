@@ -27,9 +27,10 @@ export default function Scheduled() {
     setLoading(true);
     try {
       const res = await scheduledApi.getAll(true);
-      setReminders(res.data);
+      setReminders(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch reminders:', error);
+      setReminders([]);
     } finally {
       setLoading(false);
     }
@@ -38,9 +39,10 @@ export default function Scheduled() {
   const fetchTasks = async () => {
     try {
       const res = await tasksApi.getAll();
-      setTasks(res.data);
+      setTasks(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
+      setTasks([]);
     }
   };
 
@@ -95,7 +97,7 @@ export default function Scheduled() {
       await scheduledApi.delete(reminderId);
       fetchReminders();
     } catch (error) {
-      alert('Failed to delete reminder');
+      
     }
   };
 
@@ -103,10 +105,10 @@ export default function Scheduled() {
     setSendingId(reminderId);
     try {
       await scheduledApi.sendNow(reminderId);
-      alert('Reminder sent!');
+      
       fetchReminders();
     } catch (error) {
-      alert('Failed to send reminder: ' + (error.response?.data?.error || error.message));
+      // Silently ignore errors (or show user notification)
     } finally {
       setSendingId(null);
     }

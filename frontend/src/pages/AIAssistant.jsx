@@ -45,46 +45,51 @@ function AIAssistant() {
   const loadConversations = async () => {
     try {
       const res = await aiApi.getConversations()
-      setConversations(res.data)
+      setConversations(Array.isArray(res.data) ? res.data : [])
     } catch (error) {
       console.error('Failed to load conversations:', error)
+      setConversations([])
     }
   }
 
   const loadCronJobs = async () => {
     try {
       const res = await aiApi.listCronJobs()
-      setCronJobs(res.data)
+      setCronJobs(Array.isArray(res.data) ? res.data : [])
     } catch (error) {
       console.error('Failed to load cron jobs:', error)
+      setCronJobs([])
     }
   }
 
   const loadCommandHistory = async () => {
     try {
       const res = await aiApi.getSystemCommandLogs(20)
-      setCommandHistory(res.data)
+      setCommandHistory(Array.isArray(res.data) ? res.data : [])
     } catch (error) {
       console.error('Failed to load command history:', error)
+      setCommandHistory([])
     }
   }
 
   const loadSystemMetrics = async () => {
     try {
       const res = await aiApi.getSystemMetrics()
-      setSystemMetrics(res.data)
+      setSystemMetrics(res.data && typeof res.data === 'object' && !res.data.error ? res.data : null)
     } catch (error) {
       console.error('Failed to load system metrics:', error)
+      setSystemMetrics(null)
     }
   }
 
   const loadConversationMessages = async (convId) => {
     try {
       const res = await aiApi.getConversationMessages(convId)
-      setMessages(res.data)
+      setMessages(Array.isArray(res.data) ? res.data : [])
       setSelectedConversation(convId)
     } catch (error) {
       console.error('Failed to load messages:', error)
+      setMessages([])
     }
   }
 
@@ -107,8 +112,7 @@ function AIAssistant() {
       setInputMessage('')
     } catch (error) {
       console.error('Failed to send message:', error)
-      alert(error.response?.data?.error || 'Failed to send message')
-    } finally {
+      } finally {
       setIsLoading(false)
     }
   }
@@ -136,10 +140,8 @@ function AIAssistant() {
       )
       setNewCronForm({ name: '', command: '', schedule: '* * * * *' })
       loadCronJobs()
-      alert('Cron job created successfully')
-    } catch (error) {
-      alert(error.response?.data?.error || 'Failed to create cron job')
-    }
+      } catch (error) {
+      }
   }
 
   const deleteCronJob = async (jobId) => {
@@ -148,8 +150,7 @@ function AIAssistant() {
       await aiApi.deleteCronJob(jobId)
       loadCronJobs()
     } catch (error) {
-      alert(error.response?.data?.error || 'Failed to delete cron job')
-    }
+      }
   }
 
   const renderChatTab = () => (

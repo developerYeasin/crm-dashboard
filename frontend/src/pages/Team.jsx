@@ -37,9 +37,10 @@ export default function Team() {
     setLoading(true);
     try {
       const res = await teamApi.getAll();
-      setMembers(res.data);
+      setMembers(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch team:', error);
+      setMembers([]);
     } finally {
       setLoading(false);
     }
@@ -49,9 +50,10 @@ export default function Team() {
     setTasksLoading(true);
     try {
       const res = await tasksApi.getAll({ assigned_to: memberId });
-      setMemberTasks(res.data);
+      setMemberTasks(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
+      setMemberTasks([]);
     } finally {
       setTasksLoading(false);
     }
@@ -138,7 +140,7 @@ export default function Team() {
       if (selectedMember?.id === memberId) setSelectedMember(null);
       fetchTeam();
     } catch (error) {
-      alert('Failed to delete member');
+      
     }
   };
 

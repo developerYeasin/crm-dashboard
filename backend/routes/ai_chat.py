@@ -713,6 +713,60 @@ def get_conversations():
         })
     return jsonify(result), 200
 
+@ai_bp.route('/conversations', methods=['POST'])
+@login_required
+def create_conversation():
+    """Create a new conversation."""
+    data = request.json
+    if not data or not data.get('title'):
+        return jsonify({'error': 'Title is required'}), 400
+
+    conversation = AIConversation(
+        user_id=g.current_user.id,
+        title=data.get('title', 'New Chat')
+    )
+    db.session.add(conversation)
+    db.session.commit()
+
+    return jsonify({
+        'id': conversation.id,
+        'title': conversation.title,
+        'created_at': conversation.created_at.isoformat() if conversation.created_at else None,
+        'updated_at': conversation.updated_at.isoformat() if conversation.updated_at else None,
+        'message_count': 0
+    }), 201
+
+@ai_bp.route('/conversations/<int:conv_id>', methods=['GET'])
+@login_required
+def get_conversation(conv_id):
+    """Get a single conversation by ID."""
+    conversation = AIConversation.query.filter_by(id=conv_id, user_id=g.current_user.id).first()
+    if not conversation:
+        return jsonify({'error': 'Conversation not found'}), 404
+
+    return jsonify({
+        'id': conversation.id,
+        'title': conversation.title,
+        'created_at': conversation.created_at.isoformat() if conversation.created_at else None,
+        'updated_at': conversation.updated_at.isoformat() if conversation.updated_at else None,
+        'message_count': len(conversation.messages) if hasattr(conversation, 'messages') else 0
+    }), 200
+
+@ai_bp.route('/conversations/<int:conv_id>', methods=['DELETE'])
+@login_required
+def delete_conversation(conv_id):
+    """Delete a conversation and its messages."""
+    conversation = AIConversation.query.filter_by(id=conv_id, user_id=g.current_user.id).first()
+    if not conversation:
+        return jsonify({'error': 'Conversation not found'}), 404
+
+    # Delete messages first (cascade should handle but ensure)
+    AIMessage.query.filter_by(conversation_id=conv_id).delete()
+    db.session.delete(conversation)
+    db.session.commit()
+
+    return jsonify({'message': 'Conversation deleted'}), 200
+
 @ai_bp.route('/conversations/<int:conv_id>/messages', methods=['GET'])
 @login_required
 def get_conversation_messages(conv_id):

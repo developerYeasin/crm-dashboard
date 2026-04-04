@@ -21,9 +21,10 @@ export default function Notes() {
     setLoading(true);
     try {
       const res = await notesApi.getAll();
-      setNotes(res.data);
+      setNotes(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch notes:', error);
+      setNotes([]);
     } finally {
       setLoading(false);
     }
@@ -79,7 +80,7 @@ export default function Notes() {
       if (selectedNote?.id === noteId) setSelectedNote(null);
       fetchNotes();
     } catch (error) {
-      alert('Failed to delete note');
+      
     }
   };
 

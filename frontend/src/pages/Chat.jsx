@@ -31,15 +31,17 @@ export default function Chat() {
     setLoading(true);
     try {
       const res = await chatApi.getConversations();
-      setConversations(res.data);
-      if (res.data.length > 0 && !currentConv) {
-        setCurrentConv(res.data[0]);
-      } else if (res.data.length === 0) {
+      const conversations = Array.isArray(res.data) ? res.data : [];
+      setConversations(conversations);
+      if (conversations.length > 0 && !currentConv) {
+        setCurrentConv(conversations[0]);
+      } else if (conversations.length === 0) {
         // Create first conversation automatically
         await createConversation('New Chat');
       }
     } catch (error) {
       console.error('Failed to fetch conversations:', error);
+      setConversations([]);
     } finally {
       setLoading(false);
     }
@@ -105,7 +107,7 @@ export default function Chat() {
       ]);
     } catch (error) {
       console.error('Failed to send message:', error);
-      alert('Failed to send message. Please try again.');
+      
     } finally {
       setSending(false);
     }
@@ -127,7 +129,7 @@ export default function Chat() {
         }
       }
     } catch (error) {
-      alert('Failed to delete conversation');
+      
     }
   };
 

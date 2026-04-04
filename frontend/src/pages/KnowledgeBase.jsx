@@ -32,15 +32,17 @@ export default function KnowledgeBase() {
         kbApi.getAll(),
         kbApi.getCategories(),
       ]);
-      setEntries(entriesRes.data);
-      setCategories(categoriesRes.data);
+      setEntries(Array.isArray(entriesRes.data) ? entriesRes.data : []);
+      setCategories(Array.isArray(categoriesRes.data) ? categoriesRes.data : []);
 
       // Auto-expand all categories initially
       const expanded = {};
-      categoriesRes.data.forEach(cat => expanded[cat] = true);
+      (categoriesRes.data || []).forEach(cat => expanded[cat] = true);
       setExpandedCategories(expanded);
     } catch (error) {
       console.error('Failed to fetch knowledge base:', error);
+      setEntries([]);
+      setCategories([]);
     } finally {
       setLoading(false);
     }
@@ -126,7 +128,7 @@ export default function KnowledgeBase() {
       if (selectedEntry?.id === entryId) setSelectedEntry(null);
       fetchData();
     } catch (error) {
-      alert('Failed to delete entry');
+      
     }
   };
 

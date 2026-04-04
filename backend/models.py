@@ -203,6 +203,38 @@ class AIMessage(db.Model):
     command_executed = db.Column(db.Text, nullable=True)  # If a shell command was run
     command_output = db.Column(db.Text, nullable=True)  # Output from the command
 
+    # Relationship to attachments
+    attachments = db.relationship('ChatAttachment', backref='message', lazy=True, cascade='all, delete-orphan')
+
+
+class ChatAttachment(db.Model):
+    """Stores file attachments for chat messages"""
+    __tablename__ = 'chat_attachments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    message_id = db.Column(db.Integer, db.ForeignKey('ai_messages.id'), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)  # Relative path in uploads folder
+    file_url = db.Column(db.String(500), nullable=False)  # Public URL to access the file
+    file_type = db.Column(db.String(50), nullable=False)  # 'image', 'pdf', 'document', etc.
+    original_name = db.Column(db.String(255), nullable=False)  # Original filename
+    file_size = db.Column(db.Integer, nullable=True)  # Size in bytes
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AITrainingData(db.Model):
+    """Stores training examples for Max Model 1 learning"""
+    __tablename__ = 'ai_training_data'
+
+    id = db.Column(db.Integer, primary_key=True)
+    query_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)  # SHA256 hash of normalized query
+    query_text = db.Column(db.Text, nullable=False)  # Original query text
+    response_text = db.Column(db.Text, nullable=False)  # AI response
+    source = db.Column(db.String(50), nullable=False)  # 'external_api' or 'internal'
+    confidence = db.Column(db.Float, nullable=True)  # Confidence score (0.0-1.0)
+    used_count = db.Column(db.Integer, default=1, nullable=False)  # How many times this example has been used
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class AIAction(db.Model):
     """Logs all AI-triggered actions for audit"""

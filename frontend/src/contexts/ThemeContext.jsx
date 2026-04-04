@@ -6,7 +6,9 @@ export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {
     // Check localStorage first
     const saved = localStorage.getItem('theme');
-    if (saved) return saved;
+    if (saved) {
+      return saved;
+    }
     // Default to dark mode
     return 'dark';
   });

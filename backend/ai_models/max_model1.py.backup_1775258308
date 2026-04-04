@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""
+Max Model 1: Dual-model AI system with internal retrieval and external LLM.
+
+Architecture:
+1. Internal Model: Uses sentence embeddings + FAISS for fast similarity search.
+   - Stores learned query-response pairs in database and FAISS index.
+   - Fast, cost-free inference.
+2. External Model: Configurable API (Anthropic, OpenAI, etc.) for high-quality responses.
+   - Used when internal model confidence is low or no match found.
+3. Learning: External model responses are stored for future training.
+"""
+
+import os
+import hashlib
+import json
+import numpy as np
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
+from pathlib import Path
+
+from flask import current_app
+from sqlalchemy import func
+
+from extensions import db
+from models import AITrainingData
+from config import Config
+
+
+class MaxModel1:
+    """Dual-model AI system with learning capability."""
+
+    def __init__(self):
+        self.embedding_model = None
+        self.faiss_index = None
+        self.index_mapping = {}  # Maps FAISS index IDs to query_hashes
+        self.initialized = False
+        self.confidence_threshold = Config.MAX_MODEL1_CONFIDENCE_THRESHOLD
+
+        # Ensure models directory exists
+        os.makedirs(Config.MAX_MODEL1_PATH, exist_ok=True)
+
+    def _init_embedding_model(self):
+        """Initialize the sentence transformer model."""
+        if self.embedding_model is not None:
+            return
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            # Use a small, fast model
+            model_name = Config.MAX_MODEL1_INTERNAL_TYPE == 'embeddings' and 'all-MiniLM-L6-v2' or 'all-MiniLM-L6-v2'
+            self.embedding_model = SentenceTransformer(model_name)
+            current_app.logger.info(f"Loaded embedding model: {model_name}")
+        except ImportError:
+            current_app.logger.warning("sentence-transformers not installed, using dummy embeddings")
+            self.embedding_model = None
+
+    def _load_faiss_index(self):
+        """Load FAISS index from disk or create new one."""
+        if self.faiss_index is not None:
+            return
+
+        index_path = Path(Config.MAX_MODEL1_PATH) / 'index.faiss'
+        mapping_path = Path(Config.MAX_MODEL1_PATH) / 'index_mapping.json'
+
+        if index_path.exists() and mapping_path.exists():
+            try:
+                import faiss
+                self.faiss_index = faiss.read_index(str(index_path))
+                with open(mapping_path, 'r') as f:
+                    self.index_mapping = json.load(f)
+                current_app.logger.info(f"Loaded FAISS index with {self.faiss_index.ntotal} vectors")
+            except Exception as e:
+                current_app.logger.error(f"Failed to load FAISS index: {e}")
+                self._create_new_index()
+        else:
+            self._create_new_index()
+
+    def _create_new_index(self):
+        """Create a new empty FAISS index."""
+        try:
+            import faiss
+            # Dimension depends on embedding model. For all-MiniLM-L6-v2, dim=384
+            dimension = 384
+            self.faiss_index = faiss.IndexFlatIP(dimension)  # Inner product similarity (cosine)
+            self.index_mapping = {}
+            current_app.logger.info(f"Created new FAISS index with dimension {dimension}")
+        except ImportError:
+            current_app.logger.warning("faiss-cpu not installed, similarity search disabled")
+            self.faiss_index = None
+
+    def initialize(self):
+        """Initialize the model (call within app context)."""
+        if self.initialized:
+            return
+
+        self._init_embedding_model()
+        self._load_faiss_index()
+        self.initialized = True
+        current_app.logger.info("Max Model 1 initialized")
+
+    def _compute_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Compute embedding for a text string."""
+        if self.embedding_model is None:
+            return None
+
+        try:
+            embedding = self.embedding_model.encode(text, convert_to_numpy=True)
+            # Normalize for inner product similarity
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            return embedding.astype('float32')
+        except Exception as e:
+            current_app.logger.error(f"Embedding computation failed: {e}")
+            return None
+
+    def _search_similar(self, query_embedding: np.ndarray, k: int = 5) -> List[Tuple[str, float]]:
+        """Search for similar queries in FAISS index."""
+        if self.faiss_index is None or self.faiss_index.ntotal == 0:
+            return []
+
+        try:
+            # FAISS expects 2D array
+            query_vec = query_embedding.reshape(1, -1)
+            distances, indices = self.faiss_index.search(query_vec, min(k, self.faiss_index.ntotal))
+
+            results = []
+            for idx, dist in zip(indices[0], distances[0]):
+                if idx < 0:  # FAISS returns -1 for padded results
+                    continue
+                idx_str = str(int(idx))
+                if idx_str in self.index_mapping:
+                    query_hash = self.index_mapping[idx_str]
+                    results.append((query_hash, float(dist)))
+            return results
+        except Exception as e:
+            current_app.logger.error(f"FAISS search failed: {e}")
+            return []
+
+    def _get_training_data_by_hash(self, query_hashes: List[str]) -> List[AITrainingData]:
+        """Fetch training data records by query hash."""
+        if not query_hashes:
+            return []
+
+        return AITrainingData.query.filter(
+            AITrainingData.query_hash.in_(query_hashes)
+        ).all()
+
+    def predict(self, query: str, context: Optional[List[Dict[str, str]]] = None, kb_entries: Optional[List] = None) -> Dict[str, Any]:
+        """
+        Generate a response for the given query.
+
+        Args:
+            query: User's question/command
+            context: Conversation history (list of {'role': 'user'|'assistant', 'content': '...'})
+            kb_entries: List of Knowledge Base entries to include as context
+
+        Returns:
+            {
+                'response': str,
+                'source': 'internal' | 'external',
+                'confidence': float,
+                'tokens_used': int (if external)
+            }
+        """
+        self.initialize()
+
+        # Normalize query for lookup
+        normalized_query = query.strip().lower()
+        query_hash = hashlib.sha256(normalized_query.encode()).hexdigest()[:64]
+
+        # Check if we already have an exact match in DB (fast path)
+        exact_match = AITrainingData.query.filter_by(query_hash=query_hash).first()
+        if exact_match and exact_match.confidence and exact_match.confidence >= self.confidence_threshold:
+            current_app.logger.info(f"Internal exact match: confidence={exact_match.confidence}")
+            exact_match.used_count += 1
+            db.session.commit()
+            return {
+                'response': exact_match.response_text,
+                'source': 'internal',
+                'confidence': exact_match.confidence,
+                'tokens_used': 0
+            }
+
+        # Semantic search with embeddings
+        if self.faiss_index is not None and self.faiss_index.ntotal > 0:
+            embedding = self._compute_embedding(normalized_query)
+            if embedding is not None:
+                similar = self._search_similar(embedding, k=5)
+                training_records = self._get_training_data_by_hash([qh for qh, _ in similar])
+
+                # Find best match above threshold
+                best_match = None
+                best_score = 0
+
+                for (query_hash_faiss, similarity), record in zip(similar, training_records):
+                    if record and similarity >= self.confidence_threshold and similarity > best_score:
+                        best_match = record
+                        best_score = similarity
+
+                if best_match:
+                    current_app.logger.info(f"Internal semantic match: score={best_score:.3f}")
+                    best_match.used_count += 1
+                    db.session.commit()
+                    return {
+                        'response': best_match.response_text,
+                        'source': 'internal',
+                        'confidence': best_score,
+                        'tokens_used': 0
+                    }
+
+        # Fallback to external model
+        current_app.logger.info("Falling back to external model")
+        external_result = self._call_external_model(query, context, kb_entries)
+
+        # Store the external response for future learning
+        if external_result.get('response'):
+            self.store_example(
+                query=query,
+                response=external_result['response'],
+                source='external_api',
+                confidence=external_result.get('confidence', 1.0)
+            )
+
+        return external_result
+
+    def _call_external_model(self, query: str, context: Optional[List[Dict[str, str]]], kb_entries: Optional[List]) -> Dict[str, Any]:
+        """Call the external AI API (Anthropic/OpenAI)."""
+        api_url = Config.MAX_MODEL1_EXTERNAL_API_URL
+        api_key = Config.MAX_MODEL1_EXTERNAL_API_KEY
+        model = Config.MAX_MODEL1_EXTERNAL_MODEL
+
+        if not api_url or not api_key:
+            # Fall back to environment variables
+            api_key = os.getenv('ANTHROPIC_AUTH_TOKEN') or os.getenv('ANTHROPIC_API_KEY')
+            api_url = os.getenv('ANTHROPIC_BASE_URL')
+            model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-sonnet-20241022')
+
+        if not api_key:
+            return {
+                'response': "AI service not configured. Please set API credentials.",
+                'source': 'error',
+                'confidence': 0.0,
+                'tokens_used': 0
+            }
+
+        # Call external API via direct HTTP
+        try:
+            import requests
+
+            # Build messages
+            messages_payload = []
+            if context:
+                # Include last N messages from context
+                for msg in context[-10:]:  # last 10 messages
+                    messages_payload.append({
+                        'role': msg['role'],
+                        'content': msg['content']
+                    })
+            messages_payload.append({'role': 'user', 'content': query})
+
+            # Add system prompt with CRM focus and Knowledge Base integration
+            system_prompt = """You are Max AI Agent, an expert assistant for CRM and business management.
+Your goal: help users manage customers, sales, support tickets, and business operations.
+
+Guidelines:
+- Be concise, professional, and practical.
+- If the user asks about data (e.g., "show me leads", "latest customers"), provide specific guidance on how to find this in their CRM, or if you have actual data, present it clearly.
+- If you need to execute commands or access live data, describe the steps the user should take.
+- Use the provided Knowledge Base articles to give accurate, context-specific answers.
+- If the answer isn't in the Knowledge Base, use your general knowledge about CRMs and best practices.
+- Avoid saying "I don't have access" — instead, say "Here's how you can retrieve that information" or "Based on typical CRM setup..."
+- When appropriate, suggest automation, reports, or actions the user can take.
+- Ask clarifying questions if needed to understand which CRM module or data they're referring to."""
+
+            if kb_entries:
+                system_prompt += "\n\nRelevant Knowledge Base articles:\n"
+                for i, entry in enumerate(kb_entries[:3], 1):  # Top 3
+                    system_prompt += f"{i}. {entry.title} ({entry.category}): {entry.content[:500]}\n\n"
+                system_prompt += "Use these articles to answer accurately. If the answer is in them, prioritize that information."
+
+            # Prepare request
+            json_data = {
+                'model': model,
+                'max_tokens': 4000,
+                'system': system_prompt,
+                'messages': messages_payload
+            }
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'HTTP-Referer': 'https://max-ai-agent.com'  # Optional for OpenRouter
+            }
+
+            # Determine endpoint URL
+            endpoint = api_url.rstrip('/')
+            if not endpoint.endswith('/v1'):
+                endpoint += '/v1'
+            endpoint += '/messages'
+
+            response = requests.post(endpoint, json=json_data, headers=headers, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse response - Anthropic API returns content as list of blocks
+            response_text = ''
+            if 'content' in data and isinstance(data['content'], list):
+                # Concatenate text from all text blocks (skip thinking blocks)
+                text_parts = []
+                for block in data['content']:
+                    if block.get('type') == 'text' and 'text' in block:
+                        text_parts.append(block['text'])
+                response_text = ''.join(text_parts) if text_parts else ''
+
+            # Fallback for older response formats
+            if not response_text:
+                response_text = data.get('message', {}).get('content', '')
+            if not response_text:
+                response_text = 'No response generated.'
+
+            usage = data.get('usage', {})
+            tokens_used = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+
+            return {
+                'response': response_text,
+                'source': 'external',
+                'confidence': 1.0,
+                'tokens_used': tokens_used
+            }
+
+        except Exception as e:
+            current_app.logger.error(f"External API call failed: {e}")
+            return {
+                'response': f"Error calling external model: {str(e)}",
+                'source': 'error',
+                'confidence': 0.0,
+                'tokens_used': 0
+            }
+
+    def store_example(self, query: str, response: str, source: str = 'external_api', confidence: Optional[float] = None):
+        """Store a query-response pair for future training."""
+        try:
+            normalized_query = query.strip().lower()
+            query_hash = hashlib.sha256(normalized_query.encode()).hexdigest()[:64]
+
+            # Check if already exists
+            existing = AITrainingData.query.filter_by(query_hash=query_hash).first()
+            if existing:
+                # Update used count and possibly response/confidence
+                existing.used_count += 1
+                if response and response != existing.response_text:
+                    existing.response_text = response  # Update to latest response?
+                if confidence is not None:
+                    existing.confidence = confidence
+                db.session.commit()
+                return existing
+
+            # Create new training example
+            training = AITrainingData(
+                query_hash=query_hash,
+                query_text=normalized_query,
+                response_text=response,
+                source=source,
+                confidence=confidence,
+                used_count=1
+            )
+            db.session.add(training)
+            db.session.commit()
+
+            # Compute and store embedding for future retrieval
+            embedding = self._compute_embedding(normalized_query)
+            if embedding is not None and self.faiss_index is not None:
+                idx = self.faiss_index.ntotal
+                self.faiss_index.add(embedding.reshape(1, -1))
+                self.index_mapping[str(idx)] = query_hash
+                self._save_faiss_index()
+
+            current_app.logger.info(f"Stored training example: query_hash={query_hash[:16]}..., source={source}")
+
+            return training
+
+        except Exception as e:
+            current_app.logger.error(f"Failed to store training data: {e}")
+            db.session.rollback()
+            return None
+
+    def _save_faiss_index(self):
+        """Save FAISS index and mapping to disk."""
+        try:
+            index_path = Path(Config.MAX_MODEL1_PATH) / 'index.faiss'
+            mapping_path = Path(Config.MAX_MODEL1_PATH) / 'index_mapping.json'
+
+            if self.faiss_index is not None:
+                import faiss
+                faiss.write_index(self.faiss_index, str(index_path))
+                with open(mapping_path, 'w') as f:
+                    json.dump(self.index_mapping, f)
+        except Exception as e:
+            current_app.logger.error(f"Failed to save FAISS index: {e}")
+
+    def train_from_data(self, limit: int = 10000) -> Dict[str, Any]:
+        """
+        Rebuild FAISS index from the most recent N training examples.
+        Can be called manually or via scheduled cron job.
+        """
+        current_app.logger.info(f"Starting training with up to {limit} examples")
+
+        try:
+            # Fetch recent training data
+            training_data = AITrainingData.query.order_by(
+                AITrainingData.created_at.desc()
+            ).limit(limit).all()
+
+            if not training_data:
+                return {'status': 'success', 'indexed': 0, 'message': 'No training data available'}
+
+            # Rebuild FAISS index
+            embeddings = []
+            self.index_mapping = {}
+
+            for idx, record in enumerate(training_data):
+                embedding = self._compute_embedding(record.query_text)
+                if embedding is not None:
+                    embeddings.append(embedding)
+                    self.index_mapping[str(idx)] = record.query_hash
+
+            if embeddings:
+                import faiss
+                dim = embeddings[0].shape[0]
+                self.faiss_index = faiss.IndexFlatIP(dim)
+                embedding_matrix = np.array(embeddings).astype('float32')
+                self.faiss_index.add(embedding_matrix)
+                self._save_faiss_index()
+
+            indexed_count = len(embeddings)
+            current_app.logger.info(f"Training complete: indexed {indexed_count} examples")
+
+            return {
+                'status': 'success',
+                'indexed': indexed_count,
+                'total_examples': len(training_data),
+                'message': f'Indexed {indexed_count} training examples'
+            }
+
+        except Exception as e:
+            current_app.logger.error(f"Training failed: {e}")
+            return {'status': 'error', 'message': str(e)}
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the model."""
+        total_examples = AITrainingData.query.count()
+        external_count = AITrainingData.query.filter_by(source='external_api').count()
+        internal_count = AITrainingData.query.filter_by(source='internal').count()
+
+        stats = {
+            'total_examples': total_examples,
+            'sources': {
+                'external_api': external_count,
+                'internal': internal_count
+            },
+            'faiss_index_size': self.faiss_index.ntotal if self.faiss_index else 0,
+            'confidence_threshold': self.confidence_threshold,
+            'initialized': self.initialized
+        }
+
+        # Get most frequently used training data
+        top_used = AITrainingData.query.order_by(AITrainingData.used_count.desc()).limit(5).all()
+        stats['top_used'] = [{'query': t.query_text[:50], 'used': t.used_count} for t in top_used]
+
+        return stats
+
+
+# Global singleton instance
+_max_model_instance = None
+
+def get_max_model() -> MaxModel1:
+    """Get the singleton Max Model 1 instance."""
+    global _max_model_instance
+    if _max_model_instance is None:
+        _max_model_instance = MaxModel1()
+    return _max_model_instance

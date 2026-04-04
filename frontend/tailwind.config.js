@@ -4,6 +4,7 @@ export default {
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {
@@ -19,10 +20,10 @@ export default {
           100: '#d0d0d0',
         },
         primary: {
-          400: '#3b82f6',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
+          400: '#a855f7',
+          500: '#a855f7',
+          600: '#ec4899',
+          700: '#be185d',
         },
       },
     },

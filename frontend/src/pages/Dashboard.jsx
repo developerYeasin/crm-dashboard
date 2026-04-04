@@ -21,10 +21,13 @@ export default function Dashboard() {
         activityApi.getDashboardStats(),
         activityApi.getRecentActivity(5),
       ]);
-      setStats(statsRes.data);
-      setRecentActivity(activityRes.data);
+      // Only set data if response was successful
+      setStats(statsRes.data && typeof statsRes.data === 'object' && !statsRes.data.error ? statsRes.data : null);
+      setRecentActivity(activityRes.data && Array.isArray(activityRes.data) ? activityRes.data : []);
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
+      setStats(null);
+      setRecentActivity([]);
     }
   };
 

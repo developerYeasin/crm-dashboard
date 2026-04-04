@@ -15,6 +15,7 @@ import MaxAIAgent from './pages/MaxAIAgent';
 import AgentSessions from './pages/AgentSessions';
 import AgentTemplates from './pages/AgentTemplates';
 import AgentMemories from './pages/AgentMemories';
+import { Component } from 'react';
 
 // Protected Route wrapper
 function ProtectedRoute({ children }) {
@@ -188,6 +189,34 @@ function AppRoutes() {
   );
 }
 
+// Error Boundary Component
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: '20px', background: '#fee', color: '#c00' }}>
+          <h1>Something went wrong</h1>
+          <pre>{this.state.error?.message}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   return (
     <BrowserRouter
@@ -198,7 +227,9 @@ function App() {
     >
       <AuthProvider>
         <ThemeProvider>
-          <AppRoutes />
+          <ErrorBoundary>
+            <AppRoutes />
+          </ErrorBoundary>
         </ThemeProvider>
       </AuthProvider>
     </BrowserRouter>

@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import { useTheme } from '../contexts/ThemeContext';
 import { useSocket } from '../hooks/useSocket';
 import { chatApi } from '../services/chat-api';
 import { Link } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { FiSend, FiPlus, FiTrash2, FiMessageSquare, FiSearch, FiX, FiChevronRight, FiPaperclip, FiFile, FiXCircle, FiHome, FiFileText, FiCpu, FiZap, FiFilter, FiArrowRight, FiMenu } from 'react-icons/fi';
+import { FiSend, FiPlus, FiTrash2, FiMessageSquare, FiSearch, FiX, FiChevronRight, FiPaperclip, FiFile, FiXCircle, FiHome, FiFileText, FiCpu, FiZap, FiFilter, FiArrowRight, FiMenu, FiSun, FiMoon } from 'react-icons/fi';
 
 // Agent skill definitions
 const AGENT_SKILLS = [
@@ -18,7 +19,13 @@ const AGENT_SKILLS = [
 
 export default function MaxAIAgent() {
   const { user, token, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const socket = useSocket();
+
+  // Debug: Log immediately on component definition
+  // Debug: Log initialization
+  useEffect(() => {
+    }, [user, token, socket]);
 
   // UI State
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -41,6 +48,12 @@ export default function MaxAIAgent() {
   const sidebarRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  // Ref to track latest currentConv without needing to re-subscribe
+  const currentConvRef = useRef(currentConv);
+  useEffect(() => {
+    currentConvRef.current = currentConv;
+  }, [currentConv]);
+
   // Load conversations on mount
   useEffect(() => {
     if (token) {
@@ -50,29 +63,33 @@ export default function MaxAIAgent() {
     }
   }, [token]);
 
-  // Socket listeners
+  // Socket listeners (subscribe only once, use ref for currentConv)
   useEffect(() => {
+    console.log('[WS Effect] Setting up stable socket listeners');
     const handleNewMessage = (message) => {
-      console.log('[Socket] new_message event received:', message);
       const msg = message.message || message.data || message;
+      console.log('[WS] new_message event received:', msg);
       const convId = msg.conversation_id || message.conversation_id;
-      console.log('[Socket] parsed convId:', convId, 'currentConv.id:', currentConv?.id);
+      const currentConv = currentConvRef.current; // use ref for latest value
+      console.log('[WS] convId:', convId, 'currentConv?.id:', currentConv?.id, 'messages length (from state):', messages.length);
 
-      // Clear sending state when assistant responds
+      // Clear sending state when assistant responds or final chunk
       if (msg.role === 'assistant' || msg.is_final) {
+        console.log('[WS] Clearing sending/pending (assistant or final)');
         setSending(false);
+        // setPendingResponse(false); // commented out if not used
       }
 
       // Only add if for current conversation
       if (currentConv && convId && convId !== currentConv.id) {
-        console.log('[Socket] Ignoring message for different conversation');
+        console.log('[WS] Message for different conversation, ignoring');
         return;
       }
 
       setMessages(prev => {
         const exists = msg.id && prev.some(m => m.id === msg.id);
         if (exists) {
-          console.log('[Socket] Message already exists, skipping');
+          console.log('[WS] Duplicate message ID, skipping:', msg.id);
           return prev;
         }
 
@@ -80,29 +97,21 @@ export default function MaxAIAgent() {
         const isConfirmedUserMessage = msg.role === 'user' && msg.id && typeof msg.id === 'number';
 
         // If this is a confirmed user message, remove temp user messages with matching content
-        // to replace the optimistic placeholder. Also remove any temp user message that
-        // hasn't been cleared yet (in case server echo was missed).
         let filtered = prev;
         if (isConfirmedUserMessage) {
           filtered = prev.filter(m => {
             const id = m.id;
             const isTemp = typeof id === 'string' && id.startsWith('temp-');
-            // Remove temp user messages; but keep non-temp or assistant messages
             if (isTemp && m.role === 'user') {
-              // If temp message content matches incoming user message, remove it (replace)
-              // If content doesn't match (rare edge case), also remove to avoid duplicates
+              console.log('[WS] Removing temp user message:', m.id);
               return false;
             }
             return true;
           });
-        } else {
-          // For assistant messages or other types, just add without filtering
-          // (any temp user messages should stay until their confirmation arrives)
-          filtered = prev;
         }
 
         const messageToAdd = msg.id ? msg : { ...msg, id: `server-${Date.now()}-${Math.random()}` };
-        console.log('[Socket] Adding message:', messageToAdd.role, messageToAdd.content?.substring(0, 50));
+        console.log('[WS] Adding message to state:', { role: messageToAdd.role, id: messageToAdd.id, contentPreview: (messageToAdd.content || '').substring(0, 80), is_final: msg.is_final });
         return [...filtered, messageToAdd];
       });
 
@@ -117,26 +126,28 @@ export default function MaxAIAgent() {
     };
 
     const handleComplete = () => {
-      console.log('[Socket] ai_response_complete');
+      console.log('[WS] ai_response_complete event received - setting sending=false');
       setSending(false);
     };
 
-    console.log('[Socket] Subscribing to events (currentConv:', currentConv?.id, ')');
+    console.log('[WS] Subscribing to socket events (stable)');
     socket.subscribe('new_message', handleNewMessage);
     socket.subscribe('ai_response_complete', handleComplete);
 
     return () => {
       socket.unsubscribe('new_message', handleNewMessage);
       socket.unsubscribe('ai_response_complete', handleComplete);
+      console.log('[WS] Unsubscribed socket events');
     };
-  }, [currentConv]);
+  }, [socket]); // only re-run if socket object changes (rare)
 
   // Reconnection handling: rejoin and reload messages to sync any missed ones
   useEffect(() => {
     const handleConnect = async () => {
-      console.log('[Socket] Reconnected, syncing messages...');
+      console.log('[WS] socket connected event. currentConv:', currentConv?.id, 'socket isAuthenticated:', socket.getSocket()?.isAuthenticated);
       if (currentConv) {
         // Rejoin the conversation room
+        console.log('[WS] Attempting to rejoin conversation', currentConv.id);
         socket.joinConversation(currentConv.id);
         // Reload messages from server to fill any gaps
         try {
@@ -144,10 +155,12 @@ export default function MaxAIAgent() {
             chatApi.getConversation(currentConv.id),
             chatApi.getConversationMessages(currentConv.id)
           ]);
+          console.log('[WS] Reloaded messages from server, count:', msgsRes.data.length);
           setCurrentConv(convRes.data);
           setMessages(msgsRes.data);
           setSending(false); // Ensure sending state is cleared after reload
         } catch (err) {
+          console.error('[WS] Failed to reload messages:', err);
           setError(err.response?.data?.error || 'Failed to reload messages after reconnect');
         }
       }
@@ -166,19 +179,28 @@ export default function MaxAIAgent() {
     }
   }, [messages, sending]);
 
+  // Log messages state changes
+  useEffect(() => {
+    console.log('[Render] messages state changed. Count:', messages.length, 'Last few:', messages.slice(-2).map(m => ({id: m.id, role: m.role, contentPreview: (m.content || '').substring(0, 40)})));
+  }, [messages]);
+
   const loadConversations = async () => {
     try {
       setError(null);
       const res = await chatApi.getConversations();
-      setConversations(res.data);
-      if (res.data.length > 0 && !currentConv) {
-        await loadMessages(res.data[0].id);
-      } else if (res.data.length === 0) {
+      // Ensure we have an array
+      const conversations = Array.isArray(res.data) ? res.data : [];
+      setConversations(conversations);
+      if (conversations.length > 0 && !currentConv) {
+        await loadMessages(conversations[0].id);
+      } else if (conversations.length === 0) {
         // Create a new conversation automatically
         await createConversation('New Agent Chat');
       }
     } catch (err) {
+      console.error('[MaxAIAgent] Error loading conversations:', err);
       setError(err.response?.data?.error || 'Failed to load conversations');
+      setConversations([]);
     } finally {
       setLoading(false);
     }
@@ -193,7 +215,6 @@ export default function MaxAIAgent() {
       setCurrentConv(convRes.data);
       setMessages(msgsRes.data);
       // Join the conversation room to receive real-time updates
-      console.log('[Socket] Joining conversation room:', convId);
       socket.joinConversation(convId);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load messages');
@@ -248,10 +269,14 @@ export default function MaxAIAgent() {
   };
 
   const sendMessage = async () => {
-    if ((!input.trim() && attachedFiles.length === 0) || sending || !currentConv) return;
+    console.log('[Send] sendMessage called. input:', input.trim(), 'sending:', sending, 'currentConv:', currentConv?.id);
+    if ((!input.trim() && attachedFiles.length === 0) || sending || !currentConv) {
+      console.log('[Send] Aborting - invalid state');
+      return;
+    }
 
     const messageContent = input.trim();
-    console.log('[Send] Sending message:', messageContent, 'conv:', currentConv.id);
+    console.log('[Send] Sending message to conversation', currentConv.id, ':', messageContent);
 
     // Build message with attachments if any
     const messageData = {
@@ -279,8 +304,8 @@ export default function MaxAIAgent() {
 
     try {
       await socket.sendMessage(currentConv.id, messageContent);
-      console.log('[Send] Message sent via socket');
-    } catch (err) {
+      console.log('[Send] Message sent successfully via socket');
+      } catch (err) {
       console.error('[Send] Error:', err);
       setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
       setError(err.response?.data?.error || 'Failed to send message');
@@ -295,7 +320,7 @@ export default function MaxAIAgent() {
     }
   };
 
-  const filteredConversations = conversations.filter(conv =>
+  const filteredConversations = (Array.isArray(conversations) ? conversations : []).filter(conv =>
     conv.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
     conv.last_message?.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -494,6 +519,18 @@ export default function MaxAIAgent() {
                 {currentConv ? `${messages.length} messages` : 'Start a conversation'}
               </p>
             </div>
+            {/* Theme Toggle */}
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors ml-2"
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {theme === 'dark' ? (
+                <FiSun className="w-5 h-5 text-yellow-500" />
+              ) : (
+                <FiMoon className="w-5 h-5 text-gray-600" />
+              )}
+            </button>
           </div>
         </header>
 

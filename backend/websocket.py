@@ -6,7 +6,6 @@ import os
 import json
 import time
 import asyncio
-import threading
 from datetime import datetime
 from flask import request, current_app
 from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
@@ -28,6 +27,7 @@ socket_users = {}
 # Active agent sessions: {session_id: {task, agent, db_session, user_id}}
 active_agent_sessions = {}
 
+
 def init_socketio(app):
     """Initialize SocketIO with the Flask app."""
     global socketio
@@ -38,7 +38,10 @@ def init_socketio(app):
         cors_allowed_origins=cors_origins,
         async_mode='eventlet',
         logger=True,
-        engineio_logger=True
+        engineio_logger=True,
+        ping_timeout=120,  # Increase ping timeout to 120 seconds (default is 60)
+        ping_interval=25,  # Keep ping interval reasonable
+        max_http_buffer_size=1e8  # Allow larger messages
     )
 
     # Register event handlers
@@ -244,14 +247,13 @@ def handle_send_message(data):
         'attachments': attachments_data if attachments_data else None
     }, to=room, include_self=True)
 
-    # Start AI response generation in background thread to avoid blocking WebSocket
-    import threading
-    thread = threading.Thread(
-        target=_generate_ai_response_background,
-        args=(conversation_id, room, message_content, user.id, current_app._get_current_object()),
-        daemon=True
+    # Start background task using greenlet (non-blocking with eventlet)
+    current_app.logger.info(f"[BG] Starting background greenlet for conv={conversation_id}, sid={request.sid}")
+    socketio.start_background_task(
+        _generate_ai_response_background,
+        conversation_id, room, message_content, user.id, current_app._get_current_object(), request.sid
     )
-    thread.start()
+    current_app.logger.info(f"[BG] Background greenlet started for conv={conversation_id}")
 
     # Don't emit anything else here - background thread handles everything
 
@@ -334,11 +336,14 @@ def handle_start_agent(data):
             'goal': goal
         })
 
+        # Capture the client SID for this WebSocket connection
+        client_sid = request.sid
+
         # Define stream callback that emits to the WebSocket
         async def stream_callback(session_id, event, data):
             """Emit streaming events to frontend"""
             try:
-                emit(f'agent_{event}', data, to=request.sid)
+                socketio.emit(f'agent_{event}', data, to=client_sid)
             except Exception as e:
                 current_app.logger.error(f"Failed to emit event {event}: {e}")
 
@@ -361,30 +366,30 @@ def handle_start_agent(data):
             'sid': request.sid
         }
 
-        # Run agent in background thread to not block WebSocket
-        def run_agent():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(agent.run_loop(goal))
-                loop.close()
+        # Run agent as a background greenlet (non-blocking with eventlet)
+        def run_agent(app):
+            with app.app_context():
+                try:
+                    # Since agent.run_loop is async, we need to run it in a new event loop
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(agent.run_loop(goal))
+                    loop.close()
 
-                # Cleanup
-                if session_id in active_agent_sessions:
-                    del active_agent_sessions[session_id]
-                current_app.logger.info(f"Agent session {session_id} completed")
-            except Exception as e:
-                current_app.logger.error(f"Agent task failed: {e}", exc_info=True)
-                emit('agent_failed', {
-                    'session_id': session_id,
-                    'error': str(e)
-                }, to=request.sid)
-                if session_id in active_agent_sessions:
-                    del active_agent_sessions[session_id]
+                    # Cleanup
+                    if session_id in active_agent_sessions:
+                        del active_agent_sessions[session_id]
+                    current_app.logger.info(f"Agent session {session_id} completed")
+                except Exception as e:
+                    current_app.logger.error(f"Agent task failed: {e}", exc_info=True)
+                    socketio.emit('agent_failed', {
+                        'session_id': session_id,
+                        'error': str(e)
+                    }, to=client_sid)
+                    if session_id in active_agent_sessions:
+                        del active_agent_sessions[session_id]
 
-        # Start background thread
-        thread = threading.Thread(target=run_agent, daemon=True)
-        thread.start()
+        socketio.start_background_task(run_agent, current_app._get_current_object())
 
     except Exception as e:
         current_app.logger.error(f"Failed to start agent: {e}", exc_info=True)
@@ -496,23 +501,44 @@ def handle_cancel_agent(data):
     current_app.logger.info(f"Agent session {session_id} cancelled by user {user.id}")
 
 
-def _generate_ai_response_background(conversation_id, room, message_content, user_id, app):
+def _generate_ai_response_background(conversation_id, room, message_content, user_id, app, client_sid):
     """
     Background task to generate AI response without blocking WebSocket.
     This runs in a separate thread and emits responses as they become available.
     """
     from flask import current_app
     from models import AIMessage, KnowledgeBaseEntry, AIConversation
-    from ai_models.max_model1 import get_max_model
 
     with app.app_context():
         try:
-            current_app.logger.info(f"[BG] Starting AI response generation for conversation {conversation_id}")
+            current_app.logger.info(f"[BG] START: conv={conversation_id}, room={room}, user={user_id}, client_sid={client_sid}, msg='{message_content[:50]}...'")
+            # Log that we've entered the background task
+            current_app.logger.info("[BG] Background task is running")
+            # Add immediate test emission to verify socket works
+            current_app.logger.info(f"[BG] Will emit test event to client_sid={client_sid} and room={room}")
+            try:
+                # Emit to both the specific client and the room for redundancy
+                socketio.emit('ai_response_chunk', {
+                    'conversation_id': conversation_id,
+                    'content': 'Thinking...',
+                    'is_final': False
+                }, to=client_sid)
+                socketio.emit('ai_response_chunk', {
+                    'conversation_id': conversation_id,
+                    'content': 'Thinking...',
+                    'is_final': False
+                }, to=room)
+                current_app.logger.info("[BG] Test event emitted successfully")
+            except Exception as e:
+                current_app.logger.error(f"[BG] Failed to emit test event: {e}", exc_info=True)
+                raise
 
+            current_app.logger.info("[BG] Querying conversation context from database...")
             # Get conversation context
             context_messages = AIMessage.query.filter_by(
                 conversation_id=conversation_id
             ).order_by(AIMessage.timestamp.desc()).limit(15).all()
+            current_app.logger.info(f"[BG] Retrieved {len(context_messages)} context messages")
 
             context = []
             for msg in reversed(context_messages):
@@ -525,7 +551,9 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
             kb_entries = []
             try:
                 query_terms = message_content.lower().split()
+                current_app.logger.info("[BG] Querying knowledge base...")
                 all_kb = KnowledgeBaseEntry.query.all()
+                current_app.logger.info(f"[BG] Retrieved {len(all_kb)} KB entries")
                 for entry in all_kb:
                     entry_text = (entry.title + ' ' + (entry.content or '')).lower()
                     if any(term in entry_text and len(term) > 3 for term in query_terms):
@@ -535,16 +563,69 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
             except Exception as e:
                 current_app.logger.warning(f"[BG] KB lookup failed: {e}")
 
-            # Use Max Model 1
-            max_model = get_max_model()
-            result = max_model.predict(
-                query=message_content,
-                context=context,
-                kb_entries=kb_entries
-            )
+            # Use Anthropic API directly for better responses (bypass Max Model 1)
+            try:
+                from anthropic import Anthropic
+                import os
+                api_key = os.getenv('ANTHROPIC_AUTH_TOKEN') or os.getenv('ANTHROPIC_API_KEY')
+                base_url = os.getenv('ANTHROPIC_BASE_URL')
+                model = os.getenv('ANTHROPIC_MODEL', 'claude-3-5-sonnet-20241022')
 
-            response_text = result['response']
-            full_response = response_text
+                if base_url:
+                    client = Anthropic(api_key=api_key, base_url=base_url)
+                else:
+                    client = Anthropic(api_key=api_key)
+
+                # Build messages for Anthropic
+                messages = []
+                # Add context from conversation history (last 10 messages)
+                for msg in context[-10:] if len(context) > 10 else context:
+                    messages.append({
+                        'role': msg['role'],
+                        'content': msg['content']
+                    })
+                messages.append({'role': 'user', 'content': message_content})
+
+                # Make API call with timeout
+                current_app.logger.info(f"Calling Anthropic API, model={model}")
+                try:
+                    # Set timeout using requests-based timeout if available
+                    import socket
+                    socket.setdefaulttimeout(30)  # 30 second timeout for the connection
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=4000,
+                        system="You are a helpful AI assistant for a CRM dashboard. Respond naturally and concisely. Current time: " + datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'),
+                        messages=messages,
+                        timeout=30.0  # explicit timeout in seconds
+                    )
+                except TypeError:
+                    # If timeout parameter not supported by this client version
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=4000,
+                        system="You are a helpful AI assistant for a CRM dashboard. Respond naturally and concisely. Current time: " + datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'),
+                        messages=messages
+                    )
+
+                # Extract text from content blocks (handle ThinkingBlock, TextBlock, etc.)
+                # Filter for text blocks only - skip thinking blocks and other non-text types
+                text_blocks = [block for block in response.content if getattr(block, 'type', None) == 'text']
+                if text_blocks:
+                    response_text = text_blocks[0].text
+                else:
+                    # No text blocks found - use fallback
+                    raise ValueError("No text content in AI response")
+                full_response = response_text
+                current_app.logger.info(f"Anthropic API response received (length={len(response_text)})")
+                current_app.logger.info(f"[BG] Response text preview: {response_text[:200]}...")
+
+                # Log that we're about to split into chunks
+                current_app.logger.info("[BG] Starting chunk splitting")
+            except Exception as e:
+                current_app.logger.error(f"Anthropic API call failed: {e}", exc_info=True)
+                response_text = "I apologize, but I encountered an error connecting to the AI service. Please try again."
+                full_response = response_text
 
             # Stream response in natural chunks (by sentences or clauses) for better UX
             # Split on sentence boundaries, but also ensure chunks aren't too large
@@ -552,60 +633,28 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
             import time
             import random
 
-            # Split by sentence-ending punctuation followed by space or end of string
-            sentences = re.split(r'(?<=[.!?])\s+', response_text.strip())
+            # For now, just send the full response as a single chunk (no streaming delays)
+            # to ensure reliability. Streaming can be re-enabled after we confirm basic flow works.
+            chunks = [full_response] if full_response else []
+            current_app.logger.info(f"[BG] Prepared {len(chunks)} chunk(s) for emission")
 
-            # Group sentences into reasonable chunks (2-4 sentences per chunk, or ~150-200 chars)
-            chunks = []
-            current_chunk = []
-            current_length = 0
-            max_chunk_length = 180  # target max characters per chunk
-
-            for sentence in sentences:
-                if not sentence:
-                    continue
-                sentence_len = len(sentence)
-
-                # If adding this sentence would exceed max chunk size and we already have content, flush current chunk
-                if current_length + sentence_len > max_chunk_length and current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                    current_chunk = [sentence]
-                    current_length = sentence_len
-                else:
-                    current_chunk.append(sentence)
-                    current_length += sentence_len
-
-                # Also limit to max 4 sentences per chunk to keep it natural
-                if len(current_chunk) >= 4:
-                    chunks.append(' '.join(current_chunk))
-                    current_chunk = []
-                    current_length = 0
-
-            # Don't forget the last chunk
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-
-            # If response is very short (< 150 chars), just send it as one chunk without streaming
-            if len(response_text) < 150:
-                chunks = [response_text]
-
-            # Emit chunks with a small delay for typing effect
+            # Emit all chunks
+            current_app.logger.info(f"[BG] Will emit {len(chunks)} chunk(s)")
             for i, chunk in enumerate(chunks):
                 try:
+                    current_app.logger.info(f"[BG] Emitting chunk {i+1}/{len(chunks)} (len={len(chunk)})")
                     socketio.emit('ai_response_chunk', {
                         'conversation_id': conversation_id,
                         'content': chunk,
                         'is_final': i == len(chunks) - 1
-                    }, to=room)
-                    # Typing simulation: delay proportional to chunk length, with randomness
-                    # Base: 30ms per character, min 50ms, max 400ms
-                    delay = min(0.03 * len(chunk) + random.uniform(0, 0.1), 0.4)
-                    time.sleep(delay)
+                    }, to=room)  # Use room for reliability
+                    current_app.logger.info(f"[BG] Chunk {i+1} emitted")
                 except Exception as e:
                     current_app.logger.error(f"[BG] Failed to emit chunk: {e}")
                     break  # Stop streaming if emit fails
 
             # Save assistant message
+            current_app.logger.info("[BG] Saving assistant message to database")
             assistant_msg = AIMessage(
                 conversation_id=conversation_id,
                 role='assistant',
@@ -616,8 +665,10 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
             if conversation:
                 conversation.updated_at = datetime.utcnow()
             db.session.commit()
+            current_app.logger.info(f"[BG] Assistant message saved with id={assistant_msg.id}")
 
-            # Broadcast final message
+            # Broadcast final message to the room
+            current_app.logger.info("[BG] Emitting final new_message event to room")
             socketio.emit('new_message', {
                 'id': assistant_msg.id,
                 'conversation_id': conversation_id,
@@ -625,18 +676,21 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
                 'content': full_response,
                 'created_at': assistant_msg.timestamp.isoformat() if assistant_msg.timestamp else None
             }, to=room)
+            current_app.logger.info("[BG] new_message emitted")
 
             socketio.emit('ai_response_complete', {
                 'conversation_id': conversation_id,
                 'message_id': assistant_msg.id
             }, to=room)
+            current_app.logger.info("[BG] ai_response_complete emitted")
 
-            # Notify other tabs/windows about new message
+            # Notify other tabs/windows about new message (via user room)
             socketio.emit('conversation_updated', {
                 'conversation_id': conversation_id,
                 'last_message': full_response[:100] + ('...' if len(full_response) > 100 else ''),
                 'updated_at': datetime.utcnow().isoformat()
             }, room=f"user_{user_id}")
+            current_app.logger.info("[BG] conversation_updated emitted")
 
             current_app.logger.info(f"[BG] AI response completed for conversation {conversation_id}")
 
@@ -647,6 +701,7 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
             # Save error message
             try:
                 with app.app_context():
+                    current_app.logger.info("[BG] Saving error message to database")
                     assistant_msg = AIMessage(
                         conversation_id=conversation_id,
                         role='assistant',
@@ -654,7 +709,9 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
                     )
                     db.session.add(assistant_msg)
                     db.session.commit()
+                    current_app.logger.info(f"[BG] Error message saved with id={assistant_msg.id}")
 
+                    current_app.logger.info("[BG] Emitting error new_message")
                     socketio.emit('new_message', {
                         'id': assistant_msg.id,
                         'conversation_id': conversation_id,
@@ -663,19 +720,24 @@ def _generate_ai_response_background(conversation_id, room, message_content, use
                         'created_at': assistant_msg.timestamp.isoformat() if assistant_msg.timestamp else None,
                         'error': True
                     }, to=room)
+                    current_app.logger.info("[BG] Error new_message emitted")
 
+                    current_app.logger.info("[BG] Emitting error ai_response_complete")
                     socketio.emit('ai_response_complete', {
                         'conversation_id': conversation_id,
                         'message_id': assistant_msg.id,
                         'error': True
                     }, to=room)
+                    current_app.logger.info("[BG] Error ai_response_complete emitted")
 
-                    # Notify conversation update (with error message)
+                    # Notify conversation update (with error message) to user room for other tabs
+                    current_app.logger.info("[BG] Emitting error conversation_updated")
                     socketio.emit('conversation_updated', {
                         'conversation_id': conversation_id,
                         'last_message': error_msg[:100] + ('...' if len(error_msg) > 100 else ''),
                         'updated_at': datetime.utcnow().isoformat()
                     }, room=f"user_{user_id}")
+                    current_app.logger.info("[BG] Error conversation_updated emitted")
             except Exception as e2:
                 current_app.logger.error(f"[BG] Failed to save error message: {e2}")
         finally:

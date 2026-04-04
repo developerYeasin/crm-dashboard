@@ -1,0 +1,763 @@
+import { useState, useEffect, useRef } from 'react';
+import { useAuth } from '../contexts/AuthContext';
+import { useSocket } from '../hooks/useSocket';
+import { chatApi } from '../services/chat-api';
+
+// Polyfill for crypto.randomUUID if missing (for extensions like Grammarly)
+if (typeof crypto !== 'undefined' && crypto && !crypto.randomUUID) {
+  crypto.randomUUID = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+import {
+  FiSend, FiPlus, FiTrash2, FiMessageSquare, FiClock, FiSearch,
+  FiMenu, FiX, FiChevronRight, FiSettings, FiCpu,
+  FiRotateCcw, FiCopy, FiThumbsUp, FiThumbsDown,
+  FiSun, FiZap, FiFileText, FiFilter, FiArrowRight
+} from 'react-icons/fi';
+
+// Import extracted components
+import TypingIndicator from '../components/chat/TypingIndicator';
+import SuggestionChips from '../components/chat/SuggestionChips';
+import ChatMessage from '../components/chat/ChatMessage';
+import ChatInput from '../components/chat/ChatInput';
+
+// Agent components
+import AgentChat from '../components/agent/AgentChat';
+
+// Suggestion prompts for small chips (empty conversation state)
+const SUGGESTION_PROMPTS = [
+  { icon: FiSun, text: "Explain a complex concept", prompt: "Explain quantum computing in simple terms" },
+  { icon: FiZap, text: "Brainstorm ideas", prompt: "Give me 10 innovative product ideas for sustainability" },
+  { icon: FiMessageSquare, text: "Help me write", prompt: "Help me draft a professional email to decline a meeting" },
+  { icon: FiFileText, text: "Summarize content", prompt: "Summarize the key principles of effective communication" },
+  { icon: FiFilter, text: "Analyze data", prompt: "What are the main trends in AI adoption in 2024?" },
+  { icon: FiArrowRight, text: "Plan a project", prompt: "Create a project plan for launching a mobile app" },
+];
+
+export default function MaxAIAgent() {
+  const { user } = useAuth();
+  const socket = useSocket();
+
+  // UI State
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState({
+    model: 'gpt-4',
+    temperature: 0.7,
+    systemPrompt: 'You are a helpful AI assistant.'
+  });
+
+  // Chat State
+  const [conversations, setConversations] = useState([]);
+  const [currentConv, setCurrentConv] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [streamingMessageId, setStreamingMessageId] = useState(null);
+  const [pendingResponse, setPendingResponse] = useState(false); // AI is generating
+
+  // Agent Mode State
+  const [agentMode, setAgentMode] = useState(false); // false = simple chat, true = autonomous agent
+
+  // Debug: Log state changes
+  useEffect(() => {
+    console.log('📊 MaxAI State:', {
+      socketAuth: socket.isAuthenticated,
+      socketConnected: socket.isConnected,
+      conversations: conversations.length,
+      currentConv: currentConv?.id,
+      messages: messages.map(m => ({ id: m.id, role: m.role, content: m.content.substring(0, 50) + '...' })),
+      sending,
+      pendingResponse,
+      loading
+    });
+  }, [socket.isAuthenticated, socket.isConnected, conversations.length, currentConv?.id, messages.length, sending, pendingResponse, loading]);
+
+  const messagesEndRef = useRef(null);
+  const textInputRef = useRef(null);
+  const sidebarRef = useRef(null);
+
+  // Load conversations on mount and when socket auth changes
+  useEffect(() => {
+    if (socket.isAuthenticated) {
+      loadConversations();
+    }
+  }, [socket.isAuthenticated]);
+
+  // Socket listeners for real-time updates
+  useEffect(() => {
+    const handleNewMessage = (message) => {
+      console.log('🔔 new_message event:', message);
+      // Handle different payload structures
+      const msg = message.message || message.data || message;
+      console.log('📨 Extracted message:', msg);
+      const convId = msg.conversation_id || message.conversation_id;
+      console.log('🔢 Message ID:', msg.id, 'Role:', msg.role, 'Conv ID:', convId);
+
+      // Clear pending state when any message arrives (assistant or final chunk)
+      if (msg.role === 'assistant' || msg.is_final) {
+        console.log('🤖 Clearing pendingResponse/sending from handleNewMessage');
+        setPendingResponse(false);
+        setSending(false);
+      }
+
+      // Only add if it's for the current conversation
+      if (currentConv && convId && convId !== currentConv.id) {
+        console.log('📌 Message for different conversation (current:', currentConv.id, 'incoming:', convId, ') ignoring');
+        return;
+      }
+
+      setMessages(prev => {
+        const exists = msg.id && prev.some(m => m.id === msg.id);
+        if (exists) {
+          console.log('⚠️ Duplicate by ID, skipping');
+          return prev;
+        }
+
+        // Clean up optimistic user message when assistant responds
+        let filtered = prev;
+        if (msg.role === 'assistant') {
+          filtered = prev.filter(m => { const id = m.id; return !(typeof id === 'string' && id.startsWith('temp-') && m.role === 'user'); });
+        }
+
+        const messageToAdd = msg.id ? msg : { ...msg, id: `server-${Date.now()}-${Math.random()}` };
+        const newMessages = [...filtered, messageToAdd];
+        console.log('✅ Messages updated - prev:', prev.length, '→ new:', newMessages.length);
+        return newMessages;
+      });
+
+      // Update conversation preview
+      if (convId) {
+        setConversations(prev => prev.map(conv =>
+          conv.id === convId
+            ? { ...conv, last_message: msg.content, updated_at: msg.created_at || Date.now() }
+            : conv
+        ).sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at)));
+      }
+    };
+
+    const handleConversationUpdated = (data) => {
+      console.log('🔔 conversation_updated event:', data);
+      setConversations(prev => prev.map(conv =>
+        conv.id === data.conversation_id
+          ? { ...conv, ...data }
+          : conv
+      ));
+    };
+
+    const handleChunk = (data) => {
+      console.log('🔔 ai_response_chunk event:', data);
+      // If backend sends streaming chunks, we could implement progressive display
+      // For now, just log
+    };
+
+    const handleComplete = (data) => {
+      console.log('🔔 ai_response_complete event:', data);
+      setPendingResponse(false);
+      setSending(false);
+      setStreamingMessageId(null);
+    };
+
+    // Debug: subscribe to all relevant events
+    socket.subscribe('new_message', handleNewMessage);
+    socket.subscribe('conversation_updated', handleConversationUpdated);
+    socket.subscribe('ai_response_chunk', handleChunk);
+    socket.subscribe('ai_response_complete', handleComplete);
+
+    return () => {
+      socket.unsubscribe('new_message', handleNewMessage);
+      socket.unsubscribe('conversation_updated', handleConversationUpdated);
+      socket.unsubscribe('ai_response_chunk', handleChunk);
+      socket.unsubscribe('ai_response_complete', handleComplete);
+    };
+    // Only subscribe once on mount; socket methods are stable
+    // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, sending]);
+
+  // Close mobile menu on route change
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setMobileMenuOpen(false);
+        setShowSettings(false);
+      }
+      if (e.key === '/' && document.activeElement === document.body) {
+        e.preventDefault();
+        document.getElementById('conversation-search')?.focus();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
+        e.preventDefault();
+        createConversation('New Chat');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const loadConversations = async () => {
+    try {
+      setError(null);
+      const res = await chatApi.getConversations();
+      setConversations(res.data);
+      if (res.data.length > 0 && !currentConv) {
+        await loadMessages(res.data[0].id);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load conversations');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadMessages = async (convId) => {
+    try {
+      const [convRes, msgsRes] = await Promise.all([
+        chatApi.getConversation(convId),
+        chatApi.getConversationMessages(convId)
+      ]);
+      setCurrentConv(convRes.data);
+      setMessages(msgsRes.data);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load messages');
+    }
+  };
+
+  const createConversation = async (title) => {
+    try {
+      const res = await chatApi.createConversation(title);
+      setConversations(prev => [res.data, ...prev]);
+      setCurrentConv(res.data);
+      socket.joinConversation(res.data.id);
+      setMessages([]);
+      setSidebarOpen(true);
+      setMobileMenuOpen(false);
+      return res.data;
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to create conversation');
+      throw err;
+    }
+  };
+
+  const deleteConversation = async (id, e) => {
+    e?.stopPropagation();
+    if (!confirm('Delete this conversation?')) return;
+
+    try {
+      await chatApi.deleteConversation(id);
+      setConversations(prev => prev.filter(c => c.id !== id));
+      if (currentConv?.id === id) {
+        setCurrentConv(null);
+        setMessages([]);
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to delete conversation');
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || sending || !currentConv) return;
+
+    const messageContent = input.trim();
+    const tempMessage = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content: messageContent,
+      created_at: new Date().toISOString(),
+    };
+
+    // Optimistic update
+    setMessages(prev => [...prev, tempMessage]);
+    setInput('');
+    setSending(true);
+    setPendingResponse(true);
+    setError(null);
+
+    try {
+      await socket.sendMessage(currentConv.id, messageContent);
+      // The real AI response will come via socket events
+      // We'll keep sending/pendingResponse true until we get ai_response_complete or new_message with assistant role
+    } catch (err) {
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      setError(err.response?.data?.error || 'Failed to send message');
+      setSending(false);
+      setPendingResponse(false);
+    }
+  };
+
+  const regenerateLastResponse = async () => {
+    if (!currentConv || messages.length === 0) return;
+
+    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+    if (!lastUserMessage) return;
+
+    try {
+      setSending(true);
+      await socket.sendMessage(currentConv.id, lastUserMessage.content);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to regenerate response');
+      setSending(false);
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    // Could add a toast notification here
+  };
+
+  const handleSuggestionSelect = async (suggestion) => {
+    await createConversation(suggestion.text);
+    setInput(suggestion.prompt);
+  };
+
+  const exportConversation = (format) => {
+    if (!messages.length) return;
+
+    let content, extension, mimeType;
+    const timestamp = new Date().toISOString().split('T')[0];
+
+    if (format === 'markdown') {
+      content = messages.map(m => `**${m.role === 'user' ? 'You' : 'AI'}** (${new Date(m.created_at).toLocaleString()}):\n\n${m.content}\n\n`).join('---\n\n');
+      extension = 'md';
+      mimeType = 'text/markdown';
+    } else if (format === 'json') {
+      content = JSON.stringify({ conversation: currentConv, messages }, null, 2);
+      extension = 'json';
+      mimeType = 'application/json';
+    } else {
+      // Plain text
+      content = messages.map(m => `${m.role === 'user' ? 'You' : 'AI'} (${new Date(m.created_at).toLocaleString()}):\n${m.content}\n`).join('\n---\n\n');
+      extension = 'txt';
+      mimeType = 'text/plain';
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `max-ai-chat-${timestamp}.${extension}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diff = now - date;
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString();
+  };
+
+  const formatTime = (dateStr) => {
+    if (!dateStr) return '';
+    return new Date(dateStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const filteredConversations = conversations.filter(conv =>
+    conv.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    conv.last_message?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="h-[calc(100vh-4rem)] flex items-center justify-center bg-gray-50 dark:bg-dark-900">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400 text-lg">Loading Max AI...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full bg-gray-50 dark:bg-dark-900">
+      {/* Overlay for mobile */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Conversation Sidebar */}
+      <aside
+        ref={sidebarRef}
+        className={`fixed lg:relative inset-y-0 left-0 z-50 w-full sm:w-80 lg:w-80 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transform transition-transform duration-300 ease-in-out ${
+          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+        } ${sidebarOpen ? 'translate-x-0' : 'translate-x-[-100%] lg:translate-x-0'}`}
+        style={{ marginLeft: '0' }}
+      >
+        <div className="h-full flex flex-col">
+          {/* Sidebar Header */}
+          <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center">
+                  <FiMessageSquare className="text-white w-4 h-4" />
+                </div>
+                <span className="font-bold text-lg text-gray-900 dark:text-white">Max AI</span>
+              </div>
+              <button
+                onClick={() => setMobileMenuOpen(false)}
+                className="lg:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <FiX className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Search */}
+            <div className="relative">
+              <FiSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+              <input
+                id="conversation-search"
+                type="text"
+                placeholder="Search conversations..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 bg-gray-100 dark:bg-gray-700 border border-transparent focus:border-primary-500 rounded-lg text-sm text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500/50"
+              />
+            </div>
+          </div>
+
+          {/* New Chat Button */}
+          <div className="p-4">
+            <button
+              onClick={() => createConversation('New Chat')}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white rounded-xl font-medium transition-all duration-200 shadow-sm hover:shadow-md"
+            >
+              <FiPlus className="w-4 h-4" />
+              New Chat
+            </button>
+          </div>
+
+          {/* Conversation List */}
+          <div className="flex-1 overflow-y-auto px-2">
+            {filteredConversations.length === 0 ? (
+              <div className="p-6 text-center">
+                <FiMessageSquare className="w-12 h-12 mx-auto text-gray-300 dark:text-gray-600 mb-3" />
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {searchQuery ? 'No conversations found' : 'No conversations yet'}
+                </p>
+                {!searchQuery && (
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                    Start a new conversation to begin
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-1 pb-2">
+                {filteredConversations.map(conv => (
+                  <div
+                    key={conv.id}
+                    onClick={() => {
+                      setCurrentConv(conv);
+                      socket.joinConversation(conv.id);
+                      loadMessages(conv.id);
+                      setMobileMenuOpen(false);
+                    }}
+                    className={`p-3 rounded-xl cursor-pointer transition-all duration-200 group ${
+                      currentConv?.id === conv.id
+                        ? 'bg-primary-50 dark:bg-primary-900/30 border-l-3 border-primary-500'
+                        : 'hover:bg-gray-100 dark:hover:bg-gray-700/50 border-l-3 border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <h3 className="font-semibold text-gray-900 dark:text-white text-sm truncate">
+                          {conv.title || 'New Chat'}
+                        </h3>
+                        {conv.last_message && (
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 line-clamp-2">
+                            {conv.last_message}
+                          </p>
+                        )}
+                        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 flex items-center">
+                          <FiClock className="w-3 h-3 mr-1" />
+                          {formatDate(conv.updated_at)}
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => deleteConversation(conv.id, e)}
+                        className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                        title="Delete conversation"
+                      >
+                        <FiTrash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Connection Status */}
+          <div className="p-3 border-t border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-2 text-xs">
+              {socket.isConnected && socket.isAuthenticated ? (
+                <>
+                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                  <span className="text-green-600 dark:text-green-400 font-medium">Connected</span>
+                </>
+              ) : (
+                <>
+                  <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                  <span className="text-red-600 dark:text-red-400 font-medium">Offline</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      {agentMode ? (
+        {/* Agent Mode */}
+        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-900 lg:rounded-tl-2xl shadow-lg lg:my-4 lg:mr-4 overflow-hidden">
+          <AgentChat onBack={() => setAgentMode(false)} />
+        </div>
+      ) : (
+        {/* Chat Mode */}
+        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-900 lg:rounded-tl-2xl shadow-lg lg:my-4 lg:mr-4 overflow-hidden">
+          {/* Chat Header */}
+          <header className="sticky top-0 z-20 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md border-b border-gray-200 dark:border-gray-700 px-4 lg:px-6 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className="lg:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800"
+              >
+                <FiMenu className="w-5 h-5 text-gray-600 dark:text-gray-300" />
+              </button>
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="hidden lg:flex p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300"
+                title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+              >
+                {sidebarOpen ? <FiChevronRight className="w-5 h-5" /> : <FiMenu className="w-5 h-5" />}
+              </button>
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white truncate max-w-[200px] lg:max-w-md">
+                  {currentConv?.title || 'New Chat'}
+                </h2>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {currentConv ? `${messages.length} messages` : 'No conversation selected'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {/* Agent Mode Toggle */}
+              <button
+                onClick={() => setAgentMode(!agentMode)}
+                className={`p-2 rounded-lg flex items-center gap-2 transition-colors ${
+                  agentMode
+                    ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300'
+                    : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'
+                }`}
+                title={agentMode ? "Switch to Chat mode" : "Switch to Agent mode"}
+              >
+                <FiCpu className="w-4 h-4" />
+                <span className="hidden sm:inline text-sm font-medium">
+                  {agentMode ? 'Agent' : 'Chat'}
+                </span>
+              </button>
+
+              {currentConv && (
+                <>
+                  <button
+                    onClick={regenerateLastResponse}
+                    disabled={!messages.some(m => m.role === 'assistant') || sending}
+                    className="hidden sm:flex p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Regenerate last response"
+                  >
+                    <FiRotateCcw className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setShowSettings(!showSettings)}
+                    className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-300"
+                    title="Settings"
+                  >
+                    <FiSettings className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+            </div>
+          </header>
+
+          {/* Messages area */}
+          <div className="flex-1 overflow-y-auto px-4 lg:px-6 py-6 scroll-smooth">
+            {!currentConv ? (
+              // Welcome / No conversation state
+              <div className="h-full flex flex-col items-center justify-center text-center px-4">
+                <div className="w-24 h-24 rounded-2xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center mb-6 shadow-lg shadow-primary-500/25">
+                  <FiMessageSquare className="text-white w-12 h-12" />
+                </div>
+                <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">
+                  Max AI Agent
+                </h2>
+                <p className="text-gray-600 dark:text-gray-400 mb-8 max-w-md">
+                  Your intelligent assistant for conversations, analysis, and task completion.
+                  Start a new chat to begin.
+                </p>
+                <SuggestionChips onSelect={handleSuggestionSelect} />
+              </div>
+            ) : messages.length === 0 ? (
+              // Empty conversation state
+              <div className="h-full flex flex-col items-center justify-center text-center px-4">
+                <div className="w-20 h-20 rounded-full bg-gradient-to-br from-primary-500 to-primary-600 mb-4 shadow-lg shadow-primary-500/20">
+                  <FiMessageSquare className="text-white w-10 h-10" />
+                </div>
+                <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+                  Start the conversation
+                </h3>
+                <p className="text-gray-600 dark:text-gray-400 mb-6 max-w-sm">
+                  Ask a question, request help with a task, or just chat.
+                </p>
+                <div className="flex flex-wrap gap-2 justify-center max-w-lg">
+                  {SUGGESTION_PROMPTS.slice(0, 4).map((suggestion, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => setInput(suggestion.prompt)}
+                      className="px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-primary-50 dark:hover:bg-primary-900/30 border border-gray-200 dark:border-gray-700 hover:border-primary-500 rounded-full text-sm text-gray-700 dark:text-gray-300 transition-colors"
+                    >
+                      {suggestion.text}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="max-w-4xl mx-auto space-y-6">
+                {messages.map((msg, idx) => (
+                  <ChatMessage
+                    key={msg.id || idx}
+                    message={msg}
+                    isUser={msg.role === 'user'}
+                    userName={user?.name}
+                    onCopy={copyToClipboard}
+                    onFeedback={(id, type) => console.log('Feedback', id, type)}
+                  />
+                ))}
+                {pendingResponse && <TypingIndicator />}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
+
+          {/* Input area */}
+          {currentConv && (
+            <div className="border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-4">
+              <div className="max-w-4xl mx-auto">
+                <ChatInput
+                  value={input}
+                  onChange={setInput}
+                  onSend={sendMessage}
+                  disabled={sending}
+                  placeholder="Type your message... (Enter to send, Shift+Enter for newline)"
+                  inputRef={textInputRef}
+                />
+                <p className="text-xs text-gray-400 dark:text-gray-500 text-center mt-2">
+                  Press <kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs font-medium">Enter</kbd> to send, <kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs font-medium">Shift+Enter</kbd> for newline
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Settings Panel */}
+      {showSettings && currentConv && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/50 z-40"
+            onClick={() => setShowSettings(false)}
+          />
+          <div className="fixed right-0 top-0 bottom-0 w-80 sm:w-96 bg-white dark:bg-gray-800 shadow-2xl z-50 overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Chat Settings</h3>
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <FiX className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Model
+                  </label>
+                  <select
+                    value={settings.model}
+                    onChange={(e) => setSettings({ ...settings, model: e.target.value })}
+                    className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg dark:text-white"
+                  >
+                    <option value="gpt-4">GPT-4</option>
+                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                    <option value="claude-3-opus">Claude 3 Opus</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Temperature: {settings.temperature}
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={settings.temperature}
+                    onChange={(e) => setSettings({ ...settings, temperature: parseFloat(e.target.value) })}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-xs text-gray-500 mt-1">
+                    <span>Precise</span>
+                    <span>Creative</span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    System Prompt
+                  </label>
+                  <textarea
+                    value={settings.systemPrompt}
+                    onChange={(e) => setSettings({ ...settings, systemPrompt: e.target.value })}
+                    rows={4}
+                    className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg dark:text-white text-sm"
+                  />
+                </div>
+
+                <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
+                  <button className="w-full py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg font-medium transition-colors">
+                    Save Settings
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

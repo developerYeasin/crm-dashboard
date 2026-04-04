@@ -25,7 +25,8 @@ export default function Agents() {
   const fetchStatus = async () => {
     try {
       const res = await agentsApi.getStatus();
-      setStatus(res.data);
+      // Ensure we have an object (not an error)
+      setStatus(res.data && typeof res.data === 'object' && !res.data.error ? res.data : null);
       setError(null);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to fetch agent status');
@@ -37,9 +38,11 @@ export default function Agents() {
   const fetchLogs = async () => {
     try {
       const res = await agentsApi.getLogs(null, 20);
-      setLogs(res.data);
+      // Ensure we have an array
+      setLogs(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       console.error('Failed to fetch logs:', err);
+      setLogs([]);
     }
   };
 
@@ -62,7 +65,7 @@ export default function Agents() {
       setTimeout(fetchStatus, 2000);
       setTimeout(fetchLogs, 3000);
     } catch (err) {
-      alert(`Failed to trigger ${agentNames[agentType]}: ${err.response?.data?.error || err.message}`);
+      
     } finally {
       setTriggering((prev) => ({ ...prev, [agentType]: false }));
     }

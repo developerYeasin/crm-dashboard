@@ -8,13 +8,15 @@ axios.defaults.baseURL = '';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     // Check for existing token on mount
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      verifyToken(token);
+    const storedToken = localStorage.getItem('auth_token');
+    if (storedToken) {
+      setToken(storedToken);
+      verifyToken(storedToken);
     } else {
       setIsLoading(false);
     }
@@ -39,9 +41,10 @@ export function AuthProvider({ children }) {
   const login = async (email, password) => {
     try {
       const response = await axios.post('/login', { email, password });
-      const { token, user } = response.data;
-      localStorage.setItem('auth_token', token);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      const { token: newToken, user } = response.data;
+      localStorage.setItem('auth_token', newToken);
+      axios.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
+      setToken(newToken);
       setUser(user);
       return { success: true };
     } catch (error) {
@@ -58,12 +61,14 @@ export function AuthProvider({ children }) {
     } finally {
       localStorage.removeItem('auth_token');
       delete axios.defaults.headers.common['Authorization'];
+      setToken(null);
       setUser(null);
     }
   };
 
   const value = {
     user,
+    token,
     isLoading,
     login,
     logout,
@@ -76,6 +81,7 @@ export function AuthProvider({ children }) {
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {
+    console.error('[useAuth] No context found!');
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;

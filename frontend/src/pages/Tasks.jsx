@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { FiPlus, FiFilter, FiX, FiMessageSquare, FiEdit2, FiTrash2, FiChevronRight, FiUser, FiClock, FiTag } from 'react-icons/fi';
+import { FiPlus, FiFilter, FiX, FiMessageSquare, FiEdit2, FiTrash2, FiChevronRight, FiUser, FiClock, FiTag, FiInbox } from 'react-icons/fi';
 import { tasksApi, teamApi } from '../services/api';
 import { formatDate, formatDateTime, isOverdue, getPriorityColor, getStatusColor } from '../utils/date';
 import TaskDetail from '../components/TaskDetail';
@@ -43,9 +43,10 @@ export default function Tasks() {
   const fetchTeam = async () => {
     try {
       const res = await teamApi.getAll();
-      setTeamMembers(res.data);
+      setTeamMembers(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch team:', error);
+      setTeamMembers([]);
     }
   };
 
@@ -58,11 +59,12 @@ export default function Tasks() {
       if (assigneeFilter !== 'All') params.assigned_to = assigneeFilter;
 
       const res = await tasksApi.getAll(params);
-      setTasks(res.data);
+      setTasks(Array.isArray(res.data) ? res.data : []);
       setError('');
     } catch (error) {
       setError('Failed to load tasks');
       console.error(error);
+      setTasks([]);
     } finally {
       setLoading(false);
     }
@@ -134,7 +136,7 @@ export default function Tasks() {
       fetchTasks();
       if (detailTaskId === taskId) setDetailTaskId(null);
     } catch (error) {
-      alert('Failed to delete task');
+      
     }
   };
 

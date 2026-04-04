@@ -16,6 +16,9 @@ from routes.scheduled import scheduled_bp
 from routes.agents import agents_bp
 from routes.ai_chat import ai_bp
 
+# Import WebSocket module (will initialize socketio later)
+from websocket import init_socketio
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -25,6 +28,9 @@ def create_app():
 
     # Initialize database
     db.init_app(app)
+
+    # Initialize WebSocket
+    init_socketio(app)
 
     # Register blueprints
     app.register_blueprint(auth_bp)  # /login, /logout, /verify, /change-password
@@ -57,4 +63,6 @@ def create_app():
 
 if __name__ == '__main__':
     app = create_app()
-    app.run(host='0.0.0.0', port=Config.PORT, debug=Config.DEBUG)
+    # Import socketio after init_socketio has been called
+    from websocket import socketio
+    socketio.run(app, host='0.0.0.0', port=Config.PORT, debug=Config.DEBUG)

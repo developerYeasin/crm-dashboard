@@ -53,17 +53,17 @@ export default function CalendarPage() {
 
   const handleSelectEvent = useCallback((event) => {
     // Could open task detail or navigate to task
-    console.log('Event clicked:', event);
-  }, []);
+    }, []);
 
   const fetchDayTasks = async (dateStr) => {
     setDayTasksLoading(true);
     try {
       const res = await calendarApi.getDayTasks(dateStr);
-      setDayTasks(res.data);
+      setDayTasks(Array.isArray(res.data) ? res.data : []);
       setSelectedDate(new Date(dateStr));
     } catch (error) {
       console.error('Failed to fetch day tasks:', error);
+      setDayTasks([]);
     } finally {
       setDayTasksLoading(false);
     }

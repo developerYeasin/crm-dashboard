@@ -14,6 +14,9 @@ export const chatApi = {
   deleteConversation: (id) => axios.delete(`${API_PREFIX}/conversations/${id}`),
 
   // Messages
+  getConversationMessages: (conversationId) =>
+    axios.get(`${API_PREFIX}/conversations/${conversationId}/messages`),
+
   sendMessage: (conversationId, message) =>
     axios.post(`${API_PREFIX}/chat`, {
       ...message,

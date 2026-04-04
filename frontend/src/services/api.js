@@ -119,3 +119,15 @@ export const aiApi = {
   listProcesses: () => axios.get('/api/ai/processes'),
   killProcess: (pid) => axios.post(`/api/ai/processes/${pid}/kill`),
 };
+
+// Agent Sessions API (for autonomous agent system)
+export const agentApi = {
+  listSessions: (status = null, limit = 20, offset = 0) =>
+    axios.get('/api/agent/sessions', { params: { status, limit, offset } }),
+  getSession: (sessionId) => axios.get(`/api/agent/sessions/${sessionId}`),
+  createSession: (goal, templateId = null) =>
+    axios.post('/api/agent/sessions', { goal, template_id: templateId }),
+  cancelSession: (sessionId) => axios.post(`/api/agent/sessions/${sessionId}/cancel`),
+  approveAction: (sessionId, stepId, approved) =>
+    axios.post(`/api/agent/sessions/${sessionId}/approve`, { step_id: stepId, approved }),
+};
